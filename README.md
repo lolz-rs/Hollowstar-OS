@@ -39,6 +39,9 @@ Hollowstar> fetch
 - Plays tones through the PC speaker.
 - Identity-maps all usable RAM plus the framebuffer, up to 512 GiB.
 
+Source is in `src/` (bootloader, kernel, and the shared ABI), commands are in
+`commands/`, and the Python build and test scripts are in `tools/`.
+
 ## Build
 
 The toolchains are too large to commit, so put them under `tools/` first:
