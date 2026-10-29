@@ -1,0 +1,11 @@
+[package]
+name = "reboot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hollowstar = { path = "../lib" }
+
+[[bin]]
+name = "reboot"
+path = "src/main.rs"

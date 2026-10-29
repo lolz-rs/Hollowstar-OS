@@ -1,0 +1,20 @@
+[package]
+name = "hollowstar-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+hollowstar-common = { path = "../common" }
+
+[[bin]]
+name = "hollowstar-kernel"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

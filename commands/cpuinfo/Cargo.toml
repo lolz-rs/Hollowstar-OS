@@ -1,0 +1,11 @@
+[package]
+name = "cpuinfo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hollowstar = { path = "../lib" }
+
+[[bin]]
+name = "cpuinfo"
+path = "src/main.rs"

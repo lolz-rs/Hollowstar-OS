@@ -1,0 +1,1 @@
+Show framebuffer, back buffer and graphics console details

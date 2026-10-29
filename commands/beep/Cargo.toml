@@ -1,0 +1,11 @@
+[package]
+name = "beep"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hollowstar = { path = "../lib" }
+
+[[bin]]
+name = "beep"
+path = "src/main.rs"

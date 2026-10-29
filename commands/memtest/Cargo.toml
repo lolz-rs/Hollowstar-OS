@@ -1,0 +1,11 @@
+[package]
+name = "memtest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hollowstar = { path = "../lib" }
+
+[[bin]]
+name = "memtest"
+path = "src/main.rs"

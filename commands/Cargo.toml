@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "lib",
+    "fetch",
+    "echo",
+    "help",
+    "clear",
+    "uname",
+    "uptime",
+    "meminfo",
+    "memtest",
+    "cpuinfo",
+    "commands",
+    "version",
+    "sleep",
+    "reboot",
+    "halt",
+    "gfxdemo",
+    "gfxinfo",
+    "beep",
+    "mousedemo",
+    "mouse",
+]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"

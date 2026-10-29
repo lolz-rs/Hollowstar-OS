@@ -1,0 +1,1 @@
+PC speaker test: beep [frequency] [milliseconds] or beep melody

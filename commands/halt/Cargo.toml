@@ -1,0 +1,11 @@
+[package]
+name = "halt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hollowstar = { path = "../lib" }
+
+[[bin]]
+name = "halt"
+path = "src/main.rs"

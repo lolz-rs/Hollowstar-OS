@@ -1,0 +1,11 @@
+[package]
+name = "gfxinfo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hollowstar = { path = "../lib" }
+
+[[bin]]
+name = "gfxinfo"
+path = "src/main.rs"

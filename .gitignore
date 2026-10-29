@@ -1,0 +1,25 @@
+# Build outputs
+/build/
+target/
+
+# Vendored toolchains and installers (see README: not checked in)
+/tools/qemu/
+/tools/llvm/
+/tools/llvm-tar/
+/tools/7zip/
+/tools/nasm-3.02/
+/tools/*.tar.zst
+/tools/*.msi
+/tools/*.zip
+/tools/qemu-setup.exe
+
+# Python
+__pycache__/
+*.pyc
+
+# Test artifacts
+*.ppm
+*.wav
+*.img
+*.iso
+*.vmdk
