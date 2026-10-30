@@ -21,7 +21,7 @@ mod syscall;
 
 use core::panic::PanicInfo;
 
-use hollowstar_common::{BootInfo, BOOT_MAGIC, BOOT_VERSION};
+use hollowstar_common::{color, BootInfo, BOOT_MAGIC, BOOT_VERSION};
 
 fn halt() -> ! {
     loop {
@@ -35,7 +35,7 @@ fn halt() -> ! {
 #[no_mangle]
 pub extern "C" fn kernel_main(boot_info: *const BootInfo) -> ! {
     console::init();
-    console::set_color(0x0F);
+    console::set_color(color::WHITE);
 
     if boot_info.is_null() {
         println!("Hollowstar: missing boot info");
@@ -56,9 +56,9 @@ pub extern "C" fn kernel_main(boot_info: *const BootInfo) -> ! {
     mouse::init();
 
     if !archive::init() {
-        console::set_color(0x0C);
+        console::set_color(color::RED);
         println!("Hollowstar: /commands archive is invalid");
-        console::set_color(0x0F);
+        console::set_color(color::WHITE);
     }
 
     unsafe {
@@ -72,10 +72,10 @@ pub extern "C" fn kernel_main(boot_info: *const BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    console::set_color(0x0C);
+    console::set_color(color::RED);
     println!();
     println!("KERNEL PANIC: {}", info);
-    console::set_color(0x0F);
+    console::set_color(color::WHITE);
     console::flush();
     halt();
 }

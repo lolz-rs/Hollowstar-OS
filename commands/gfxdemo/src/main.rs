@@ -88,8 +88,7 @@ fn draw_color_bars() {
     }
 }
 
-/// Smooth true-colour rainbow: 16.7 million colours instead of the old
-/// 16-colour text palette.
+/// Smooth true-colour rainbow across all 16.7 million colours.
 fn draw_rainbow(t: u64) {
     let w = gfx::width();
     let phase = (t / 30) as u8;
@@ -319,12 +318,12 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
     };
 
     if !gfx::init() {
-        hs::write_color(0x0C, "gfxdemo: no linear framebuffer available\n");
+        hs::write_color(hs::color::RED, "gfxdemo: no linear framebuffer available\n");
         hs::write("gfxdemo: this build needs a VBE linear mode; VGA text fallback is active.\n");
         hs::exit(1);
     }
     if !gfx::enter() {
-        hs::write_color(0x0C, "gfxdemo: failed to enter graphics mode\n");
+        hs::write_color(hs::color::RED, "gfxdemo: failed to enter graphics mode\n");
         hs::exit(1);
     }
 
@@ -394,7 +393,7 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
     } else {
         0
     };
-    hs::write_color(0x0B, "gfxdemo: ");
+    hs::write_color(hs::color::CYAN, "gfxdemo: ");
     hs::print!(
         "{} frames in {} ms, {}x{}x{}, {} fps\n",
         frame, elapsed, info.width, info.height, info.bpp, avg_fps

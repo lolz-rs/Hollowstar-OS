@@ -1,6 +1,6 @@
 use core::ptr::addr_of_mut;
 
-use hollowstar_common::{COMMAND_STACK_TOP, VERSION_STRING};
+use hollowstar_common::{color, COMMAND_STACK_TOP, VERSION_STRING};
 
 use crate::{archive, console, elf, keyboard, println, syscall};
 
@@ -27,9 +27,9 @@ fn args_ptr() -> *mut u8 {
 }
 
 fn print_prompt() {
-    console::set_color(0x0B);
+    console::set_color(color::CYAN);
     console::write_str("Hollowstar> ");
-    console::set_color(0x0F);
+    console::set_color(color::WHITE);
     console::flush();
 }
 
@@ -300,11 +300,11 @@ fn execute(line: &[u8]) {
 
 pub fn run() -> ! {
     console::clear();
-    console::set_color(0x0F);
+    console::set_color(color::WHITE);
     println!("Hollowstar {} (x86_64)", VERSION_STRING);
-    console::set_color(0x08);
+    console::set_color(color::DARK_GRAY);
     println!("type help");
-    console::set_color(0x0F);
+    console::set_color(color::WHITE);
     println!();
 
     loop {

@@ -11,7 +11,7 @@ fn cstr(bytes: &[u8]) -> &str {
 #[no_mangle]
 pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
     let count = hs::command_count();
-    hs::write_color(0x0B, "/commands\n");
+    hs::write_color(hs::color::CYAN, "/commands\n");
     for i in 0..count {
         let mut name = [0u8; 32];
         let mut description = [0u8; 64];

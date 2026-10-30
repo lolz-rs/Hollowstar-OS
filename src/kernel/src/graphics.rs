@@ -316,6 +316,17 @@ pub fn rgb(r: u8, g: u8, b: u8) -> u32 {
     }
 }
 
+/// Convert a packed `0x00RRGGBB` true-colour value to the framebuffer's native
+/// channel layout.
+#[inline]
+pub fn from_rgb(value: u32) -> u32 {
+    rgb(
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        (value & 0xFF) as u8,
+    )
+}
+
 /// Fill one span of 32-bit pixels.
 #[inline]
 fn fill_span(dst: *mut u32, count: usize, color: u32) {

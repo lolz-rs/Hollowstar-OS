@@ -27,7 +27,7 @@ fn cstr(bytes: &[u8]) -> &str {
 }
 
 fn star(line: &str) {
-    hs::write_color(0x0B, line);
+    hs::write_color(hs::color::CYAN, line);
     let mut pad = 26usize.saturating_sub(line.len());
     while pad > 0 {
         hs::write(" ");
@@ -36,11 +36,11 @@ fn star(line: &str) {
 }
 
 fn label(text: &str) {
-    hs::write_color(0x08, text);
+    hs::write_color(hs::color::DARK_GRAY, text);
 }
 
 fn value(text: &str) {
-    hs::write_color(0x07, text);
+    hs::write_color(hs::color::LIGHT_GRAY, text);
 }
 
 #[no_mangle]
@@ -49,7 +49,7 @@ pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
     hs::info(&mut info);
 
     star(STAR[0]);
-    hs::write_color(0x0F, "Hollowstar ");
+    hs::write_color(hs::color::WHITE, "Hollowstar ");
     value(hs::VERSION_STRING);
     hs::write("\n");
 

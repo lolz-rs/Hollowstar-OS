@@ -39,14 +39,16 @@ pub fn write_bytes(bytes: &[u8]) {
     }
 }
 
-pub fn write_color(color: u8, text: &str) {
+/// Write text in a packed `0x00RRGGBB` true colour, then restore the previous
+/// colour.
+pub fn write_color(value: u32, text: &str) {
     if text.is_empty() {
         return;
     }
     unsafe {
         syscall5(
             SYS_WRITE_COLOR,
-            color as u64,
+            value as u64,
             text.as_ptr() as u64,
             text.len() as u64,
             0,
@@ -55,12 +57,13 @@ pub fn write_color(color: u8, text: &str) {
     }
 }
 
-pub fn set_color(color: u8) -> u8 {
-    unsafe { syscall5(SYS_SET_COLOR, color as u64, 0, 0, 0, 0) as u8 }
+/// Set the foreground colour (packed `0x00RRGGBB`). Returns the previous one.
+pub fn set_color(value: u32) -> u32 {
+    unsafe { syscall5(SYS_SET_COLOR, value as u64, 0, 0, 0, 0) as u32 }
 }
 
-pub fn get_color() -> u8 {
-    unsafe { syscall5(SYS_GET_COLOR, 0, 0, 0, 0, 0) as u8 }
+pub fn get_color() -> u32 {
+    unsafe { syscall5(SYS_GET_COLOR, 0, 0, 0, 0, 0) as u32 }
 }
 
 /// Start a continuous PC-speaker tone. Frequency 0 is equivalent to `audio_off`.

@@ -7,7 +7,7 @@ use hs::gfx;
 #[no_mangle]
 pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
     if !gfx::init() {
-        hs::write_color(0x0C, "gfxinfo: no linear framebuffer active\n");
+        hs::write_color(hs::color::RED, "gfxinfo: no linear framebuffer active\n");
         hs::write("  The kernel is using the VGA text fallback.\n");
         hs::exit(1);
     }
@@ -15,7 +15,7 @@ pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
     let info = gfx::info();
     let back_size = info.pitch as u64 * info.height as u64;
 
-    hs::write_color(0x0B, "Graphics\n");
+    hs::write_color(hs::color::CYAN, "Graphics\n");
     hs::write("  framebuffer ");
     hs::print!("{:#010x}\n", info.framebuffer);
     hs::write("  back buffer ");

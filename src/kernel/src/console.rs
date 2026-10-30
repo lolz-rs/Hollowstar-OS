@@ -1,6 +1,6 @@
 use core::fmt;
 
-use hollowstar_common::{BootInfo, BOOT_MAGIC, BOOT_VERSION};
+use hollowstar_common::{color, BootInfo, BOOT_MAGIC, BOOT_VERSION};
 
 use crate::{graphics, memory, serial};
 
@@ -23,7 +23,9 @@ const MAX_COLS: usize = 512;
 const MAX_ROWS: usize = 256;
 const MAX_CELLS: usize = MAX_COLS * MAX_ROWS;
 
-/// Standard VGA 16-colour palette, used to colour text in graphics mode.
+/// Standard VGA 16-colour palette. Only used by the VGA text fallback and the
+/// 80x25 monitor dump, which are limited to 16 hardware colours. The graphics
+/// console stores full true-colour values instead.
 const PALETTE_RGB: [(u8, u8, u8); 16] = [
     (0x00, 0x00, 0x00),
     (0x00, 0x00, 0xAA),
@@ -43,18 +45,43 @@ const PALETTE_RGB: [(u8, u8, u8); 16] = [
     (0xFF, 0xFF, 0xFF),
 ];
 
+/// One console cell. Colours are packed `0x00RRGGBB` true colour.
+/// 12 bytes: 512×256 cells is 1.5 MiB, placed at `CELLS_ADDR`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Cell {
+    ch: u8,
+    fg: u32,
+    bg: u32,
+}
+
+/// The cell buffer lives in free low RAM between the page-directory area
+/// (which starts at 2 MiB) and the command load address (8 MiB). Keeping it
+/// out of .bss lets a full 4K grid coexist with the bootloader's 512 KiB flat
+/// kernel limit, and it is still identity-mapped.
+const CELLS_ADDR: usize = 0x0040_0000;
+
 static mut GRAPHICS: bool = false;
 static mut PRESENT_READY: bool = false;
 static mut COLS: usize = SHADOW_WIDTH;
 static mut ROWS: usize = SHADOW_HEIGHT;
 static mut CURSOR_X: usize = 0;
 static mut CURSOR_Y: usize = 0;
-static mut COLOR: u8 = 0x0F;
-static mut CELLS: [u16; MAX_CELLS] = [0; MAX_CELLS];
-static mut PALETTE: [u32; 16] = [0; 16];
+static mut COLOR: u32 = color::WHITE;
+static mut CELLS: *mut Cell = CELLS_ADDR as *mut Cell;
 static mut CURSOR_DRAWN: bool = false;
 static mut DRAWN_X: usize = 0;
 static mut DRAWN_Y: usize = 0;
+
+#[inline]
+unsafe fn cell_get(index: usize) -> Cell {
+    *CELLS.add(index)
+}
+
+#[inline]
+unsafe fn cell_set(index: usize, cell: Cell) {
+    *CELLS.add(index) = cell;
+}
 
 #[inline]
 fn shadow_ptr() -> *mut u16 {
@@ -66,24 +93,46 @@ fn graphics_active() -> bool {
     unsafe { GRAPHICS }
 }
 
-fn init_palette() {
+/// Nearest VGA palette index for a true-colour value.
+fn vga_index(rgb: u32) -> u8 {
+    let r = ((rgb >> 16) & 0xFF) as i32;
+    let g = ((rgb >> 8) & 0xFF) as i32;
+    let b = (rgb & 0xFF) as i32;
+    let mut best = 0usize;
+    let mut best_distance = i32::MAX;
+    let mut i = 0usize;
+    while i < 16 {
+        let (pr, pg, pb) = PALETTE_RGB[i];
+        let dr = r - pr as i32;
+        let dg = g - pg as i32;
+        let db = b - pb as i32;
+        let distance = dr * dr + dg * dg + db * db;
+        if distance < best_distance {
+            best_distance = distance;
+            best = i;
+        }
+        i += 1;
+    }
+    best as u8
+}
+
+fn vga_attr(fg: u32, bg: u32) -> u8 {
+    vga_index(fg) | (vga_index(bg) << 4)
+}
+
+fn vga_index_rgb(index: u8) -> u32 {
+    let (r, g, b) = PALETTE_RGB[(index & 0x0F) as usize];
+    color::rgb(r, g, b)
+}
+
+fn blank_cell() -> Cell {
     unsafe {
-        let mut i = 0;
-        while i < 16 {
-            let (r, g, b) = PALETTE_RGB[i];
-            PALETTE[i] = graphics::rgb(r, g, b);
-            i += 1;
+        Cell {
+            ch: b' ',
+            fg: COLOR,
+            bg: color::BLACK,
         }
     }
-}
-
-#[inline]
-fn palette_color(index: u8) -> u32 {
-    unsafe { PALETTE[(index & 0x0F) as usize] }
-}
-
-fn blank_cell() -> u16 {
-    unsafe { (b' ' as u16) | ((COLOR as u16) << 8) }
 }
 
 fn clear_cells() {
@@ -93,7 +142,7 @@ fn clear_cells() {
         // backing store rather than COLS * ROWS contiguous entries.
         let mut i = 0;
         while i < MAX_CELLS {
-            CELLS[i] = blank;
+            cell_set(i, blank);
             i += 1;
         }
         CURSOR_X = 0;
@@ -105,9 +154,11 @@ fn clear_cells() {
 fn shadow_clear() {
     unsafe {
         let blank = blank_cell();
+        let attr = vga_attr(blank.fg, blank.bg) as u16;
+        let word = (blank.ch as u16) | (attr << 8);
         let mut i = 0;
         while i < SHADOW_WIDTH * SHADOW_HEIGHT {
-            *shadow_ptr().add(i) = blank;
+            *shadow_ptr().add(i) = word;
             i += 1;
         }
     }
@@ -121,7 +172,7 @@ fn shadow_sync() {
         while y < SHADOW_HEIGHT {
             let mut x = 0;
             while x < SHADOW_WIDTH {
-                *shadow_ptr().add(y * SHADOW_WIDTH + x) = CELLS[y * MAX_COLS + x];
+                shadow_put(x, y, cell_get(y * MAX_COLS + x));
                 x += 1;
             }
             y += 1;
@@ -129,28 +180,29 @@ fn shadow_sync() {
     }
 }
 
-fn shadow_put(x: usize, y: usize, ch: u8, attr: u8) {
+fn shadow_put(x: usize, y: usize, cell: Cell) {
     if x >= SHADOW_WIDTH || y >= SHADOW_HEIGHT {
         return;
     }
+    let attr = vga_attr(cell.fg, cell.bg) as u16;
     unsafe {
-        *shadow_ptr().add(y * SHADOW_WIDTH + x) = (ch as u16) | ((attr as u16) << 8);
+        *shadow_ptr().add(y * SHADOW_WIDTH + x) = (cell.ch as u16) | (attr << 8);
     }
 }
 
-fn draw_cell(x: usize, y: usize, ch: u8, attr: u8) {
-    draw_cell_impl(x, y, ch, attr, false);
+fn draw_cell(x: usize, y: usize, cell: Cell) {
+    draw_cell_impl(x, y, cell, false);
 }
 
 /// Draw one cell. When `bg_prefilled` is set the back buffer is already the
-/// palette's black, so a black background does not need another fill. That
-/// turns a full-screen redraw into one buffer clear plus glyph pixels.
-fn draw_cell_impl(x: usize, y: usize, ch: u8, attr: u8, bg_prefilled: bool) {
+/// cell background colour, so a black background does not need another fill.
+/// That turns a full-screen redraw into one buffer clear plus glyph pixels.
+fn draw_cell_impl(x: usize, y: usize, cell: Cell, bg_prefilled: bool) {
     if !graphics_active() {
         return;
     }
-    let fg = palette_color(attr & 0x0F);
-    let bg = palette_color((attr >> 4) & 0x0F);
+    let fg = graphics::from_rgb(cell.fg);
+    let bg = graphics::from_rgb(cell.bg);
     let info = graphics::info();
     let fw = info.font_width.max(1);
     let fh = info.font_height.max(1);
@@ -176,7 +228,7 @@ fn draw_cell_impl(x: usize, y: usize, ch: u8, attr: u8, bg_prefilled: bool) {
             graphics::mark_dirty(px, py, fw, fh);
         }
 
-        if ch == b' ' || ch == 0 {
+        if cell.ch == b' ' || cell.ch == 0 {
             return;
         }
         let glyph_cols = fw.min(8);
@@ -184,7 +236,7 @@ fn draw_cell_impl(x: usize, y: usize, ch: u8, attr: u8, bg_prefilled: bool) {
         if font.is_null() {
             return;
         }
-        let glyph = font.add(ch as usize * fh as usize);
+        let glyph = font.add(cell.ch as usize * fh as usize);
         let mut row = 0;
         while row < fh {
             let bits = *glyph.add(row as usize);
@@ -216,8 +268,7 @@ fn redraw_all() {
         while y < ROWS {
             let mut x = 0;
             while x < COLS {
-                let cell = CELLS[y * MAX_COLS + x];
-                draw_cell_impl(x, y, (cell & 0xFF) as u8, (cell >> 8) as u8, true);
+                draw_cell_impl(x, y, cell_get(y * MAX_COLS + x), true);
                 x += 1;
             }
             y += 1;
@@ -235,7 +286,7 @@ fn draw_cursor() {
         let fh = graphics::font_height().max(1);
         let px = CURSOR_X as u32 * fw;
         let py = CURSOR_Y as u32 * fh + fh.saturating_sub(2);
-        graphics::fill_rect(px, py, fw, 2, palette_color(COLOR & 0x0F));
+        graphics::fill_rect(px, py, fw, 2, graphics::from_rgb(COLOR));
         CURSOR_DRAWN = true;
         DRAWN_X = CURSOR_X;
         DRAWN_Y = CURSOR_Y;
@@ -246,14 +297,20 @@ fn put_cell(x: usize, y: usize, ch: u8) {
     if x >= unsafe { COLS } || y >= unsafe { ROWS } {
         return;
     }
-    let attr = unsafe { COLOR };
+    let cell = unsafe {
+        Cell {
+            ch,
+            fg: COLOR,
+            bg: color::BLACK,
+        }
+    };
     unsafe {
-        CELLS[y * MAX_COLS + x] = (ch as u16) | ((attr as u16) << 8);
+        cell_set(y * MAX_COLS + x, cell);
     }
     if !graphics::cmd_active() {
-        draw_cell(x, y, ch, attr);
+        draw_cell(x, y, cell);
     }
-    shadow_put(x, y, ch, attr);
+    shadow_put(x, y, cell);
 }
 
 fn scroll() {
@@ -262,7 +319,7 @@ fn scroll() {
         while y < ROWS {
             let mut x = 0;
             while x < COLS {
-                CELLS[(y - 1) * MAX_COLS + x] = CELLS[y * MAX_COLS + x];
+                cell_set((y - 1) * MAX_COLS + x, cell_get(y * MAX_COLS + x));
                 x += 1;
             }
             y += 1;
@@ -270,7 +327,7 @@ fn scroll() {
         let blank = blank_cell();
         let mut x = 0;
         while x < COLS {
-            CELLS[(ROWS - 1) * MAX_COLS + x] = blank;
+            cell_set((ROWS - 1) * MAX_COLS + x, blank);
             x += 1;
         }
         CURSOR_Y = ROWS - 1;
@@ -348,7 +405,6 @@ pub fn init() {
             COLS = ((graphics::width() / fw) as usize).clamp(1, MAX_COLS);
             ROWS = ((graphics::height() / fh) as usize).clamp(1, MAX_ROWS);
         }
-        init_palette();
         clear_cells();
         shadow_clear();
         redraw_all();
@@ -388,23 +444,24 @@ pub fn clear() {
     serial::write_str("\x1b[2J\x1b[H");
 }
 
-pub fn set_color(color: u8) {
+/// Set the foreground colour. `value` is packed `0x00RRGGBB`.
+pub fn set_color(value: u32) {
     if graphics_active() {
         unsafe {
-            COLOR = color;
+            COLOR = value;
         }
     } else {
         unsafe {
-            vga_set_color(color);
+            vga_set_color(vga_attr(value, color::BLACK));
         }
     }
 }
 
-pub fn get_color() -> u8 {
+pub fn get_color() -> u32 {
     if graphics_active() {
         unsafe { COLOR }
     } else {
-        unsafe { vga_get_color() }
+        unsafe { vga_index_rgb(vga_get_color() & 0x0F) }
     }
 }
 
@@ -449,8 +506,7 @@ pub fn flush() {
     }
     unsafe {
         if CURSOR_DRAWN {
-            let cell = CELLS[DRAWN_Y * MAX_COLS + DRAWN_X];
-            draw_cell(DRAWN_X, DRAWN_Y, (cell & 0xFF) as u8, (cell >> 8) as u8);
+            draw_cell(DRAWN_X, DRAWN_Y, cell_get(DRAWN_Y * MAX_COLS + DRAWN_X));
         }
     }
     draw_cursor();

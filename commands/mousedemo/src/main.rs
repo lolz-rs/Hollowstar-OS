@@ -418,11 +418,11 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
     }
 
     if !gfx::init() {
-        hs::write_color(0x0C, "mousedemo: no linear framebuffer available\n");
+        hs::write_color(hs::color::RED, "mousedemo: no linear framebuffer available\n");
         hs::exit(1);
     }
     if !gfx::enter() {
-        hs::write_color(0x0C, "mousedemo: failed to enter graphics mode\n");
+        hs::write_color(hs::color::RED, "mousedemo: failed to enter graphics mode\n");
         hs::exit(1);
     }
 
@@ -493,7 +493,7 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
 
     gfx::leave();
 
-    hs::write_color(0x0B, "mousedemo: ");
+    hs::write_color(hs::color::CYAN, "mousedemo: ");
     hs::print!(
         "{} frames, {} packets, cursor {},{}",
         frames, state.packets, state.x, state.y

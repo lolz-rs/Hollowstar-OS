@@ -49,12 +49,12 @@ pub fn dispatch(num: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
             console::write_byte(a as u8);
             0
         }
-        SYS_WRITE_COLOR => sys_write_color(a as u8, b, c),
+        SYS_WRITE_COLOR => sys_write_color(a as u32, b, c),
         SYS_CMD_COUNT => archive::count() as u64,
         SYS_CMD_GET => sys_cmd_get(a, b, c, d, e),
         SYS_SET_COLOR => {
             let old = console::get_color();
-            console::set_color(a as u8);
+            console::set_color(a as u32);
             old as u64
         }
         SYS_GET_COLOR => console::get_color() as u64,
@@ -134,7 +134,7 @@ fn sys_write(fd: u64, ptr: u64, len: u64) -> u64 {
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
     if fd == 2 {
         let old = console::get_color();
-        console::set_color(0x0C);
+        console::set_color(color::RED);
         console::write_bytes(bytes);
         console::set_color(old);
     } else {
@@ -143,14 +143,14 @@ fn sys_write(fd: u64, ptr: u64, len: u64) -> u64 {
     len as u64
 }
 
-fn sys_write_color(color: u8, ptr: u64, len: u64) -> u64 {
+fn sys_write_color(value: u32, ptr: u64, len: u64) -> u64 {
     if ptr == 0 || len == 0 {
         return 0;
     }
     let len = len.min(1024 * 1024) as usize;
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
     let old = console::get_color();
-    console::set_color(color);
+    console::set_color(value);
     console::write_bytes(bytes);
     console::set_color(old);
     len as u64

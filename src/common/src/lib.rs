@@ -7,6 +7,31 @@ pub const VERSION_STRING: &str = "0.1.0";
 
 pub const HOSTNAME: &str = "Hollowstar";
 
+/// 24-bit true-colour values, packed as `0x00RRGGBB`.
+///
+/// The kernel console, the command library, and the drawing API all use this
+/// representation. Graphics modes convert it to the framebuffer's channel
+/// masks; the VGA text fallback maps it to the nearest of the 16 hardware
+/// colours, because that is all the text hardware can display.
+pub mod color {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
+        ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+    }
+
+    pub const BLACK: u32 = rgb(0x00, 0x00, 0x00);
+    pub const WHITE: u32 = rgb(0xFF, 0xFF, 0xFF);
+    pub const LIGHT_GRAY: u32 = rgb(0xAA, 0xAA, 0xAA);
+    pub const GRAY: u32 = rgb(0x80, 0x80, 0x80);
+    pub const DARK_GRAY: u32 = rgb(0x55, 0x55, 0x55);
+    pub const RED: u32 = rgb(0xFF, 0x55, 0x55);
+    pub const GREEN: u32 = rgb(0x55, 0xFF, 0x55);
+    pub const BLUE: u32 = rgb(0x55, 0x55, 0xFF);
+    pub const CYAN: u32 = rgb(0x55, 0xFF, 0xFF);
+    pub const MAGENTA: u32 = rgb(0xFF, 0x55, 0xFF);
+    pub const YELLOW: u32 = rgb(0xFF, 0xFF, 0x55);
+    pub const ORANGE: u32 = rgb(0xFF, 0xAA, 0x00);
+}
+
 pub const BOOT_INFO_ADDR: u64 = 0x5000;
 pub const MEMMAP_ADDR: u64 = 0x5200;
 pub const BOOT_MAGIC: u32 = 0x5254_5348; // "HSTR"

@@ -8,7 +8,7 @@ pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
     let mut info = hs::SystemInfo::zeroed();
     hs::info(&mut info);
 
-    hs::write_color(0x0B, "Memory\n");
+    hs::write_color(hs::color::CYAN, "Memory\n");
     hs::write("  total      ");
     hs::print_size(info.mem_total_kb);
     hs::write("\n  usable     ");

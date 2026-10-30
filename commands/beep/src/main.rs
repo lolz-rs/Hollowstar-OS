@@ -36,7 +36,7 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
             hs::beep(note, 160);
             hs::sleep(40);
         }
-        hs::write_color(0x0B, "beep: ");
+        hs::write_color(hs::color::CYAN, "beep: ");
         hs::write("played a 7-note arpeggio on the PC speaker\n");
         hs::exit(0);
     }
@@ -49,7 +49,7 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
         .unwrap_or(200)
         .clamp(1, 10_000);
 
-    hs::write_color(0x0B, "beep: ");
+    hs::write_color(hs::color::CYAN, "beep: ");
     hs::print!("{} Hz for {} ms (PIT channel 2 / PC speaker)\n", freq, ms);
     hs::beep(freq, ms as u64);
     hs::exit(0)

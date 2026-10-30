@@ -12,14 +12,14 @@ pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
     let mut info = hs::SystemInfo::zeroed();
     hs::info(&mut info);
 
-    hs::write_color(0x0B, "High memory\n");
+    hs::write_color(hs::color::CYAN, "High memory\n");
     hs::write("  top     ");
     hs::print_size(info.mem_top_kb);
     hs::write("\n");
 
     let top = info.mem_top_kb.saturating_mul(1024);
     if top < 4 * 1024 * 1024 {
-        hs::write_color(0x0C, "  not enough RAM to probe\n");
+        hs::write_color(hs::color::RED, "  not enough RAM to probe\n");
         hs::exit(1);
     }
 
@@ -34,9 +34,9 @@ pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
 
         hs::print!("  {:#012x}  ", addr);
         if value == PATTERN {
-            hs::write_color(0x0A, "ok\n");
+            hs::write_color(hs::color::GREEN, "ok\n");
         } else {
-            hs::write_color(0x0C, "bad\n");
+            hs::write_color(hs::color::RED, "bad\n");
             failures += 1;
         }
     }

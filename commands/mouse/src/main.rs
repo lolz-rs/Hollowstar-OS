@@ -28,12 +28,12 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
 
     let state = hs::mouse_state();
     if (state.flags & MOUSE_FLAG_AVAILABLE) == 0 {
-        hs::write_color(0x0C, "mouse: not detected\n");
+        hs::write_color(hs::color::RED, "mouse: not detected\n");
         hs::write("mouse: the PS/2 auxiliary device did not initialize.\n");
         hs::exit(1);
     }
 
-    hs::write_color(0x0B, "mouse: ");
+    hs::write_color(hs::color::CYAN, "mouse: ");
     hs::write("PS/2 auxiliary device ready\n");
     hs::print!("  position: {}, {}\n", state.x, state.y);
     hs::print!("  delta:    {}, {}\n", state.dx, state.dy);
