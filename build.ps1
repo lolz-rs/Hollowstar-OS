@@ -1,3 +1,10 @@
+param(
+    # Preferred VBE mode. The bootloader falls back to smaller 16:9 and 4:3
+    # modes when the firmware or video RAM cannot provide this size.
+    [int]$GfxWidth = 1920,
+    [int]$GfxHeight = 1080
+)
+
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -143,10 +150,11 @@ $Stage2Bin = Join-Path $Build "stage2.bin"
 $Stage2IsoBin = Join-Path $Build "stage2_iso.bin"
 & $Nasm -f bin -o $BootBin (Join-Path $Root "src\bootloader\boot.asm")
 & $Nasm -f bin -o $IsoBootBin (Join-Path $Root "src\bootloader\iso_boot.asm")
-& $Nasm -f bin -o $Stage2Bin (Join-Path $Root "src\bootloader\stage2.asm")
+$GfxDefines = @("-DGFX_WIDTH=$GfxWidth", "-DGFX_HEIGHT=$GfxHeight")
+& $Nasm -f bin @GfxDefines -o $Stage2Bin (Join-Path $Root "src\bootloader\stage2.asm")
 $KernelSize = (Get-Item $KernelBin).Length
 $KernelSectors = [math]::Ceiling($KernelSize / 512)
-& $Nasm -f bin "-DISO_BOOT" "-DKERNEL_SIZE=$KernelSize" "-DKERNEL_SECTORS=$KernelSectors" `
+& $Nasm -f bin @GfxDefines "-DISO_BOOT" "-DKERNEL_SIZE=$KernelSize" "-DKERNEL_SECTORS=$KernelSectors" `
     -o $Stage2IsoBin (Join-Path $Root "src\bootloader\stage2.asm")
 if ($LASTEXITCODE -ne 0) { throw "NASM failed: stage2.asm" }
 if ((Get-Item $BootBin).Length -ne 512) { throw "boot.bin is not 512 bytes" }

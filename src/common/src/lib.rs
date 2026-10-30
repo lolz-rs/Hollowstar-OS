@@ -12,9 +12,11 @@ pub const MEMMAP_ADDR: u64 = 0x5200;
 pub const BOOT_MAGIC: u32 = 0x5254_5348; // "HSTR"
 pub const BOOT_VERSION: u32 = 2;
 
-/// Back buffer lives in the low 16 MiB of RAM, after the kernel and command
-/// image. Graphics is disabled when the firmware mode or RAM check fails.
+/// Back buffer lives in low RAM after the kernel and command image. It is
+/// sized for the selected mode (1920x1080x32 needs 8.3 MiB). Graphics is
+/// disabled when the firmware mode or RAM check fails.
 pub const BACK_BUFFER_ADDR: u64 = 0x0100_0000;
+pub const BACK_BUFFER_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const GFX_FLAG_AVAILABLE: u32 = 1 << 0;
 pub const GFX_FLAG_LINEAR: u32 = 1 << 1;
 pub const GFX_FLAG_FONT: u32 = 1 << 2;
@@ -255,3 +257,4 @@ pub const SYS_AUDIO_OFF: u64 = 22;
 pub const SYS_AUDIO_BEEP: u64 = 23;
 pub const SYS_KEY_POLL: u64 = 24;
 pub const SYS_MOUSE_STATE: u64 = 25;
+pub const SYS_GFX_PRESENT_RECT: u64 = 26;

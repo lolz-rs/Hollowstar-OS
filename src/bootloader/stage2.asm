@@ -33,6 +33,15 @@
 %define PD_ADDR         0x200000
 %define MAX_PD          512             ; 512 x 1 GiB = 512 GiB
 
+; Preferred VBE mode. The default is 1080p; build.ps1 can override it with
+; -GfxWidth/-GfxHeight for a higher-resolution default.
+%ifndef GFX_WIDTH
+%define GFX_WIDTH       1920
+%endif
+%ifndef GFX_HEIGHT
+%define GFX_HEIGHT      1080
+%endif
+
 start:
     cli
     xor ax, ax
@@ -177,8 +186,9 @@ do_e820:
 ; ---------------------------------------------------------------------------
 ; VBE linear framebuffer setup
 ;
-; Selects a 32-bit direct-color linear mode (1024x768, 800x600 or 640x480),
-; copies the BIOS 8x16 font to 0x9E000 and records everything in BootInfo.
+; Selects a 32-bit direct-color linear mode (1920x1080 by default, with
+; 16:9 and 4:3 fallbacks), copies the BIOS 8x16 font to 0x9E000 and records
+; everything in BootInfo.
 ; Any failure simply leaves the graphics fields zeroed so the kernel falls
 ; back to the VGA text console.
 ; ---------------------------------------------------------------------------
@@ -227,7 +237,23 @@ vbe_setup:
     ; Copy the 8x16 font while the BIOS is still in text mode.
     call copy_font
 
-    ; Find the best available mode: 1024x768, then 800x600, then 640x480.
+    ; Find the best available mode. 1080p is the default; the rest are
+    ; progressively smaller 16:9 and 4:3 fallbacks for limited VRAM.
+    mov ax, GFX_WIDTH
+    mov bx, GFX_HEIGHT
+    call find_mode
+    cmp cx, 0xFFFF
+    jne .found
+    mov ax, 1600
+    mov bx, 900
+    call find_mode
+    cmp cx, 0xFFFF
+    jne .found
+    mov ax, 1280
+    mov bx, 720
+    call find_mode
+    cmp cx, 0xFFFF
+    jne .found
     mov ax, 1024
     mov bx, 768
     call find_mode
@@ -243,9 +269,9 @@ vbe_setup:
     call find_mode
     cmp cx, 0xFFFF
     je .fail
-    mov [vbe_mode_num], cx
 
 .found:
+    mov [vbe_mode_num], cx
     ; Switch to the chosen mode with the linear-framebuffer bit set.
     xor ax, ax
     mov es, ax

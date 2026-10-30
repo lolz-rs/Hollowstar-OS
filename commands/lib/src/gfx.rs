@@ -2,18 +2,28 @@
 //!
 //! Everything renders into the kernel-owned back buffer. Call `present()` to
 //! copy the finished frame to the screen at the next vertical retrace.
+//!
+//! The back buffer is 32-bit true colour (16.7 million colours). Besides solid
+//! fills this module provides gradients, alpha blending, rounded rectangles,
+//! triangles, and HSV helpers.
 
 use core::arch::asm;
 use core::ptr;
 
 use crate::{syscall5, GraphicsInfo, SYS_GFX_ENTER, SYS_GFX_INFO, SYS_GFX_LEAVE, SYS_GFX_PRESENT,
-            SYS_GFX_VSYNC};
+            SYS_GFX_PRESENT_RECT, SYS_GFX_VSYNC};
 
 static mut INFO: GraphicsInfo = GraphicsInfo::zeroed();
 static mut READY: bool = false;
 static mut R_SHIFT: u32 = 16;
 static mut G_SHIFT: u32 = 8;
 static mut B_SHIFT: u32 = 0;
+
+static mut DIRTY: bool = false;
+static mut DIRTY_X0: i32 = 0;
+static mut DIRTY_Y0: i32 = 0;
+static mut DIRTY_X1: i32 = 0;
+static mut DIRTY_Y1: i32 = 0;
 
 fn mask_shift(mask: u32) -> u32 {
     if mask == 0 {
@@ -46,6 +56,7 @@ pub fn init() -> bool {
             B_SHIFT = mask_shift(info.blue_mask);
             INFO = info;
             READY = true;
+            DIRTY = false;
             true
         } else {
             READY = false;
@@ -74,17 +85,73 @@ pub fn height() -> i32 {
 }
 
 pub fn enter() -> bool {
-    unsafe { syscall5(SYS_GFX_ENTER, 0, 0, 0, 0, 0) != 0 }
+    unsafe {
+        DIRTY = false;
+        syscall5(SYS_GFX_ENTER, 0, 0, 0, 0, 0) != 0
+    }
 }
 
 pub fn leave() {
     unsafe {
+        DIRTY = false;
         syscall5(SYS_GFX_LEAVE, 0, 0, 0, 0, 0);
     }
 }
 
-pub fn present() {
+fn mark_dirty(x: i32, y: i32, w: i32, h: i32) {
+    if !ready() || w <= 0 || h <= 0 {
+        return;
+    }
+    let info = info();
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x.saturating_add(w)).min(info.width as i32);
+    let y1 = (y.saturating_add(h)).min(info.height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
     unsafe {
+        if !DIRTY {
+            DIRTY = true;
+            DIRTY_X0 = x0;
+            DIRTY_Y0 = y0;
+            DIRTY_X1 = x1;
+            DIRTY_Y1 = y1;
+        } else {
+            DIRTY_X0 = DIRTY_X0.min(x0);
+            DIRTY_Y0 = DIRTY_Y0.min(y0);
+            DIRTY_X1 = DIRTY_X1.max(x1);
+            DIRTY_Y1 = DIRTY_Y1.max(y1);
+        }
+    }
+}
+
+/// Copy the changed rectangle to the screen. Does nothing when no drawing
+/// happened since the previous present.
+pub fn present() {
+    if !ready() {
+        return;
+    }
+    unsafe {
+        if !DIRTY {
+            return;
+        }
+        syscall5(
+            SYS_GFX_PRESENT_RECT,
+            DIRTY_X0 as u64,
+            DIRTY_Y0 as u64,
+            (DIRTY_X1 - DIRTY_X0) as u64,
+            (DIRTY_Y1 - DIRTY_Y0) as u64,
+            0,
+        );
+        DIRTY = false;
+    }
+}
+
+/// Copy the whole frame even if nothing is marked dirty.
+pub fn present_full() {
+    unsafe {
+        DIRTY = false;
         syscall5(SYS_GFX_PRESENT, 0, 0, 0, 0, 0);
     }
 }
@@ -111,6 +178,40 @@ pub fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 
 #[inline]
+fn channels(color: u32) -> (u32, u32, u32) {
+    unsafe {
+        (
+            (color >> R_SHIFT) & 0xFF,
+            (color >> G_SHIFT) & 0xFF,
+            (color >> B_SHIFT) & 0xFF,
+        )
+    }
+}
+
+#[inline]
+fn lerp_channel(a: u32, b: u32, t: u32) -> u32 {
+    if t == 0 {
+        a
+    } else if t >= 255 {
+        b
+    } else {
+        (a * (255 - t) + b * t + 127) / 255
+    }
+}
+
+/// Interpolate between two true-colour values. `t` runs from 0 to 255.
+#[inline]
+pub fn lerp(a: u32, b: u32, t: u32) -> u32 {
+    let (ar, ag, ab) = channels(a);
+    let (br, bg, bb) = channels(b);
+    rgb(
+        lerp_channel(ar, br, t) as u8,
+        lerp_channel(ag, bg, t) as u8,
+        lerp_channel(ab, bb, t) as u8,
+    )
+}
+
+#[inline]
 pub fn pixel(x: i32, y: i32, color: u32) {
     if !ready() {
         return;
@@ -124,6 +225,20 @@ pub fn pixel(x: i32, y: i32, color: u32) {
         ptr::write(
             (info.back_buffer as *mut u32).add(y as usize * stride + x as usize),
             color,
+        );
+    }
+    mark_dirty(x, y, 1, 1);
+}
+
+#[inline]
+fn fill_span(dst: *mut u32, count: usize, color: u32) {
+    unsafe {
+        asm!(
+            "cld; rep stosd",
+            inout("rdi") dst => _,
+            in("eax") color,
+            inout("rcx") count => _,
+            options(nostack)
         );
     }
 }
@@ -142,21 +257,183 @@ pub fn fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32) {
     }
     let count = (x1 - x0) as usize;
     let stride = (info.pitch / 4) as usize;
+    let base = info.back_buffer as *mut u32;
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
+    if x0 == 0 && x1 == info.width as i32 {
+        let dst = unsafe { base.add(y0 as usize * stride) };
+        fill_span(dst, (y1 - y0) as usize * stride, color);
+    } else {
+        let mut row = y0;
+        while row < y1 {
+            let dst = unsafe { base.add(row as usize * stride + x0 as usize) };
+            fill_span(dst, count, color);
+            row += 1;
+        }
+    }
+}
+
+/// Blend one pixel with the existing framebuffer contents.
+/// `alpha` is 0 (transparent) to 255 (opaque).
+#[inline]
+pub fn blend_pixel(x: i32, y: i32, color: u32, alpha: u32) {
+    if alpha == 0 {
+        return;
+    }
+    if alpha >= 255 {
+        pixel(x, y, color);
+        return;
+    }
+    if !ready() {
+        return;
+    }
+    let info = info();
+    if x < 0 || y < 0 || x >= info.width as i32 || y >= info.height as i32 {
+        return;
+    }
+    let stride = (info.pitch / 4) as usize;
+    unsafe {
+        let dst = (info.back_buffer as *mut u32).add(y as usize * stride + x as usize);
+        let old = *dst;
+        let (sr, sg, sb) = channels(color);
+        let (dr, dg, db) = channels(old);
+        let inv = 255 - alpha;
+        *dst = rgb(
+            ((sr * alpha + dr * inv + 127) / 255) as u8,
+            ((sg * alpha + dg * inv + 127) / 255) as u8,
+            ((sb * alpha + db * inv + 127) / 255) as u8,
+        );
+    }
+    mark_dirty(x, y, 1, 1);
+}
+
+/// Alpha-blend a rectangle over whatever is already in the back buffer.
+pub fn fill_rect_alpha(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u32) {
+    if alpha == 0 || w <= 0 || h <= 0 {
+        return;
+    }
+    if alpha >= 255 {
+        fill_rect(x, y, w, h, color);
+        return;
+    }
+    if !ready() {
+        return;
+    }
+    let info = info();
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x.saturating_add(w)).min(info.width as i32);
+    let y1 = (y.saturating_add(h)).min(info.height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let stride = (info.pitch / 4) as usize;
+    let base = info.back_buffer as *mut u32;
+    let (sr, sg, sb) = channels(color);
+    let inv = 255 - alpha;
     let mut row = y0;
     while row < y1 {
-        let dst =
-            (info.back_buffer as *mut u32).wrapping_add(row as usize * stride + x0 as usize);
-        unsafe {
-            asm!(
-                "cld; rep stosd",
-                inout("rdi") dst => _,
-                in("eax") color,
-                inout("rcx") count => _,
-                options(nostack)
-            );
+        let mut col = x0;
+        while col < x1 {
+            unsafe {
+                let dst = base.add(row as usize * stride + col as usize);
+                let old = *dst;
+                let (dr, dg, db) = channels(old);
+                *dst = rgb(
+                    ((sr * alpha + dr * inv + 127) / 255) as u8,
+                    ((sg * alpha + dg * inv + 127) / 255) as u8,
+                    ((sb * alpha + db * inv + 127) / 255) as u8,
+                );
+            }
+            col += 1;
         }
         row += 1;
     }
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
+}
+
+/// Fill a rectangle with a vertical gradient from `top` to `bottom`.
+pub fn vertical_gradient(x: i32, y: i32, w: i32, h: i32, top: u32, bottom: u32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    if h == 1 {
+        fill_rect(x, y, w, 1, top);
+        return;
+    }
+    let mut row = 0;
+    while row < h {
+        let t = (row as u32 * 255) / (h as u32 - 1);
+        fill_rect(x, y + row, w, 1, lerp(top, bottom, t));
+        row += 1;
+    }
+}
+
+/// Fill a rectangle with a horizontal gradient from `left` to `right`.
+pub fn horizontal_gradient(x: i32, y: i32, w: i32, h: i32, left: u32, right: u32) {
+    if !ready() || w <= 0 || h <= 0 {
+        return;
+    }
+    let info = info();
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x.saturating_add(w)).min(info.width as i32);
+    let y1 = (y.saturating_add(h)).min(info.height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let stride = (info.pitch / 4) as usize;
+    let base = info.back_buffer as *mut u32;
+    let mut row = y0;
+    while row < y1 {
+        let mut col = x0;
+        while col < x1 {
+            let t = if w == 1 {
+                0
+            } else {
+                ((col - x) as u32 * 255) / (w as u32 - 1)
+            };
+            unsafe {
+                ptr::write(
+                    base.add(row as usize * stride + col as usize),
+                    lerp(left, right, t.min(255)),
+                );
+            }
+            col += 1;
+        }
+        row += 1;
+    }
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
+}
+
+/// Rectangle outline drawn with `thickness` pixels on each edge.
+pub fn rect_outline(x: i32, y: i32, w: i32, h: i32, thickness: i32, color: u32) {
+    if w <= 0 || h <= 0 || thickness <= 0 {
+        return;
+    }
+    let t = thickness.min(w).min(h);
+    fill_rect(x, y, w, t, color);
+    fill_rect(x, y + h - t, w, t, color);
+    fill_rect(x, y + t, t, h - 2 * t, color);
+    fill_rect(x + w - t, y + t, t, h - 2 * t, color);
+}
+
+/// Filled rectangle with rounded corners.
+pub fn fill_round_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let r = radius.max(0).min(w / 2).min(h / 2);
+    if r == 0 {
+        fill_rect(x, y, w, h, color);
+        return;
+    }
+    fill_rect(x + r, y, w - 2 * r, h, color);
+    fill_rect(x, y + r, r, h - 2 * r, color);
+    fill_rect(x + w - r, y + r, r, h - 2 * r, color);
+    fill_circle(x + r, y + r, r, color);
+    fill_circle(x + w - r - 1, y + r, r, color);
+    fill_circle(x + r, y + h - r - 1, r, color);
+    fill_circle(x + w - r - 1, y + h - r - 1, r, color);
 }
 
 pub fn line(mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: u32) {
@@ -290,6 +567,10 @@ pub fn fill_polygon(points: &[(i32, i32)], color: u32) {
     }
 }
 
+pub fn fill_triangle(p0: (i32, i32), p1: (i32, i32), p2: (i32, i32), color: u32) {
+    fill_polygon(&[p0, p1, p2], color);
+}
+
 pub fn polygon_outline(points: &[(i32, i32)], color: u32) {
     if points.len() < 2 {
         return;
@@ -390,18 +671,36 @@ pub fn hue_bright(h: u8, brightness: u8) -> u32 {
     )
 }
 
-pub fn scale_color(color: u32, factor: u8) -> u32 {
-    unsafe {
-        let r = (color >> R_SHIFT) & 0xFF;
-        let g = (color >> G_SHIFT) & 0xFF;
-        let b = (color >> B_SHIFT) & 0xFF;
-        let f = factor as u32;
-        rgb(
-            (r * f / 255) as u8,
-            (g * f / 255) as u8,
-            (b * f / 255) as u8,
-        )
+/// HSV to true colour. Hue is 0..255 around the wheel, saturation and value
+/// are 0..255.
+pub fn hsv(h: u8, s: u8, v: u8) -> u32 {
+    if s == 0 {
+        return rgb(v, v, v);
     }
+    let region = (h as u32 * 6) / 256;
+    let f = (h as u32 * 6) % 256;
+    let p = (v as u32 * (255 - s as u32)) / 255;
+    let q = (v as u32 * (255 - (s as u32 * f) / 255)) / 255;
+    let t = (v as u32 * (255 - (s as u32 * (255 - f)) / 255)) / 255;
+    let v = v as u32;
+    match region {
+        0 => rgb(v as u8, t as u8, p as u8),
+        1 => rgb(q as u8, v as u8, p as u8),
+        2 => rgb(p as u8, v as u8, t as u8),
+        3 => rgb(p as u8, q as u8, v as u8),
+        4 => rgb(t as u8, p as u8, v as u8),
+        _ => rgb(v as u8, p as u8, q as u8),
+    }
+}
+
+pub fn scale_color(color: u32, factor: u8) -> u32 {
+    let (r, g, b) = channels(color);
+    let f = factor as u32;
+    rgb(
+        (r * f / 255) as u8,
+        (g * f / 255) as u8,
+        (b * f / 255) as u8,
+    )
 }
 
 // Quarter-wave sine table, 0..90 degrees in 5.625-degree steps, scaled by 1024.

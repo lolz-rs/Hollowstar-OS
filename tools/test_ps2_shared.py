@@ -115,7 +115,7 @@ def main():
             time.sleep(0.01)
         time.sleep(0.8)
         text = reader.snapshot().decode("latin-1", "replace")
-        if "position: 512, 384" not in text:
+        if "position: 960, 540" not in text:
             failures.append("mouse deltas did not cancel back to the centre")
         if "packets:  0" in text[text.rfind("Hollowstar> mouse"):]:
             failures.append("no mouse packets decoded during the stress run")

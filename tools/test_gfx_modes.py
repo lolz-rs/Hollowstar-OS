@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Check VBE resolution priority and the VGA text fallback.
+"""Check VBE resolution priority, performance, and the VGA text fallback.
 
-QEMU's std VGA exposes 1024x768x32 only when its aperture is large enough.
-Shrinking it to 2 MiB should select 800x600x32; 1 MiB is too small for any of
-the three supported modes, so the kernel must keep the VGA text console.
+QEMU's std VGA only exposes a mode when its aperture is large enough:
+
+  16 MiB -> 1920x1080x32 (the default, 8.3 MiB back buffer)
+   4 MiB -> 1280x720x32  (1080p and 1600x900 do not fit)
+   2 MiB -> 800x600x32   (1024x768 needs 3 MiB)
+   1 MiB -> VGA text     (640x480 needs 1.2 MiB)
+
+The 1080p run also checks that gfxdemo clears the old ~20 fps ceiling.
 """
 import pathlib
+import re
 import subprocess
 import threading
 import time
@@ -43,7 +49,7 @@ def wait_for(reader, needle, timeout=30):
     return False
 
 
-def run(vgamem_mb, commands, needles):
+def run(vgamem_mb, commands, needles, demo_seconds=1):
     proc = subprocess.Popen(
         [QEMU, "-m", "512", "-drive", f"format=raw,file={IMG},if=ide,index=0",
          "-boot", "c", "-display", "none", "-serial", "stdio", "-no-reboot",
@@ -59,7 +65,7 @@ def run(vgamem_mb, commands, needles):
                 proc.stdin.write(bytes([ch]))
                 proc.stdin.flush()
                 time.sleep(0.002)
-            time.sleep(1.5)
+            time.sleep(demo_seconds + 2.0 if command.startswith("gfxdemo") else 1.5)
     proc.terminate()
     try:
         proc.wait(timeout=3)
@@ -74,8 +80,34 @@ def run(vgamem_mb, commands, needles):
 def main():
     failures = []
 
-    ok, missing, text = run(2, ["gfxinfo", "gfxdemo 1"],
-                            ["800x600x32", "double buffered", "frames", "fps"])
+    ok, missing, text = run(16, ["gfxinfo", "gfxdemo 1"],
+                            ["1920x1080x32", "8100 KiB", "240x67",
+                             "double buffered", "frames", "fps"])
+    if not ok:
+        failures.append("vgamem_mb=16 did not reach the prompt")
+    if missing:
+        failures.append("vgamem_mb=16 missing: " + ", ".join(missing))
+    else:
+        print("1080p default: ok")
+    match = re.search(r"gfxdemo: (\d+) frames in \d+ ms, 1920x1080x32, (\d+) fps", text)
+    if not match:
+        failures.append("could not parse the 1080p gfxdemo result")
+    elif int(match.group(2)) < 20:
+        failures.append(f"1080p gfxdemo ran at only {match.group(2)} fps")
+    else:
+        print(f"1080p gfxdemo: {match.group(2)} fps")
+
+    ok, missing, text = run(4, ["gfxinfo"],
+                            ["1280x720x32", "160x45", "double buffered"])
+    if not ok:
+        failures.append("vgamem_mb=4 did not reach the prompt")
+    if missing:
+        failures.append("vgamem_mb=4 missing: " + ", ".join(missing))
+    else:
+        print("1280x720 fallback: ok")
+
+    ok, missing, text = run(2, ["gfxinfo"],
+                            ["800x600x32", "100x37", "double buffered"])
     if not ok:
         failures.append("vgamem_mb=2 did not reach the prompt")
     if missing:
@@ -96,7 +128,7 @@ def main():
         for failure in failures:
             print("FAIL:", failure)
         raise SystemExit(1)
-    print("PASS: resolution priority and VGA text fallback verified.")
+    print("PASS: resolution priority, performance, and VGA text fallback verified.")
 
 
 if __name__ == "__main__":

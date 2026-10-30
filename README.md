@@ -30,8 +30,9 @@ Hollowstar> fetch
 
 - Boots from a 512-byte MBR or an El Torito ISO. Testing happens under QEMU;
   the ISO uses the same BIOS path VMware and VirtualBox take.
-- Runs a 1024×768×32 VBE console, with 800×600 and 640×480 fallbacks and an
-  80×25 VGA text mode when VBE is not available.
+- Runs a 1920×1080×32 VBE console by default, with 1600×900, 1280×720,
+  1024×768, 800×600 and 640×480 fallbacks and an 80×25 VGA text mode when VBE
+  is not available. The default size can be overridden at build time.
 - Loads commands as separate Rust ELF binaries from an embedded `/commands`
   archive.
 - Reads a PS/2 keyboard and mouse, including the wheel and the back/forward
@@ -64,6 +65,13 @@ Then build from the repository root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+The bootloader asks VBE for 1920×1080 first. To make a different size the
+default, pass it to the build (the fallback list still applies):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -GfxWidth 2560 -GfxHeight 1440
 ```
 
 Everything lands in `build/`:
@@ -148,13 +156,13 @@ for `halt`.
    whole El Torito image at `0x7C00`; this sector jumps to the stage2 copy at
    `0x8000`.
 3. **Stage2** (`src/bootloader/stage2.asm`). Turns on A20, collects the E820
-   map, and asks VBE for a 32-bit linear mode: 1024×768 first, then 800×600,
-   then 640×480. It copies the BIOS 8×16 font to `0x9E000` and loads the
-   kernel, either from the disk image or from the boot image on the ISO path.
-   Then it enters protected mode, moves the kernel to `0x100000`, builds
-   identity page tables for all usable RAM and the framebuffer, marks the
-   framebuffer write-combining through the PAT, enables long mode, and calls
-   the kernel with the boot-info pointer in `RDI`.
+   map, and asks VBE for a 32-bit linear mode: 1920×1080 first, then 1600×900,
+   1280×720, 1024×768, 800×600, and 640×480. It copies the BIOS 8×16 font to
+   `0x9E000` and loads the kernel, either from the disk image or from the boot
+   image on the ISO path. Then it enters protected mode, moves the kernel to
+   `0x100000`, builds identity page tables for all usable RAM and the
+   framebuffer, marks the framebuffer write-combining through the PAT, enables
+   long mode, and calls the kernel with the boot-info pointer in `RDI`.
 4. **Kernel** (`src/kernel`). Zeroes BSS, sets up GDT/TSS, IDT, PIC, and PIT,
    starts the speaker and mouse drivers, loads the command archive, brings up
    the console, and runs the shell.
@@ -208,7 +216,7 @@ rounded up to whole 2048-byte sectors.
 | `0x700000` | Double-fault IST stack |
 | `0x800000` | Command load address |
 | `0xC00000` | Command stack top (64 KiB) |
-| `0x01000000` | Graphics back buffer (pitch × height, up to 3 MiB) |
+| `0x01000000` | Graphics back buffer (pitch × height, up to 64 MiB) |
 
 Stage2 rounds the top of usable RAM up to a whole GiB, allocates one page
 directory per GiB (capped at 512 GiB), and fills it with 2 MiB identity pages.
@@ -222,18 +230,36 @@ the 1 GiB PCI hole between low and high RAM; usable RAM is still 16.0 GiB.
 
 ## Graphics and sound
 
-Stage2 takes the first 32-bit direct-colour linear mode it can get. The kernel
-checks the mode before switching the console: linear flag, 32 bpp, sane pitch
-and size, a usable back buffer, and a readable 8×16 font. If any of that is
-wrong, it stays in 80×25 VGA text.
+Stage2 takes the first supported 32-bit direct-colour linear mode in
+preference order: 1920×1080, 1600×900, 1280×720, 1024×768, 800×600, 640×480.
+The kernel checks the mode before switching the console: linear flag, 32 bpp,
+sane pitch and size, a usable back buffer, and a readable 8×16 font. If any of
+that is wrong, it stays in 80×25 VGA text. The back buffer is sized from
+`pitch × height` (8,100 KiB at 1080p, 33 MiB at 4K) and capped at 64 MiB.
+
+The mode is true colour: 8 bits each for red, green and blue, so 16.7 million
+colours instead of the old 16-colour console palette. `commands/lib/src/gfx.rs`
+provides solid fills, `rgb`/`hsv`/`hue`, linear gradients in both directions,
+alpha blending (`fill_rect_alpha`, `blend_pixel`), rounded rectangles, triangles
+and general polygons, circles, and scaled text. `gfxdemo` exercises the lot.
 
 The graphics console keeps a cell buffer and draws glyphs from the BIOS font.
-It also mirrors the 80×25 text grid to `0x50000`, so the test harness can dump
-text even when the legacy `0xB8000` window is inactive in VBE mode. Frames are
-composed in the back buffer at `0x01000000`; `SYS_GFX_PRESENT` waits for
-vertical retrace and copies the result with `rep movsq`. Commands call
-`SYS_GFX_ENTER`, draw with `commands/lib/src/gfx.rs`, and hand the screen back
-with `SYS_GFX_LEAVE`.
+Its capacity covers a 4K grid (480×135); 1080p uses 240×67 cells. It also
+mirrors the 80×25 text grid to `0x50000`, so the test harness can dump text
+even when the legacy `0xB8000` window is inactive in VBE mode.
+
+Frames are composed in the back buffer at `0x01000000`. Drawing tracks a dirty
+rectangle, so the console only copies the cells that changed, and commands can
+pass their own rectangle to `SYS_GFX_PRESENT_RECT` (the `gfx::present()`
+wrapper does this automatically). Full-frame copies use aligned 16-byte
+`movntdq` streaming stores, falling back to `rep movsq` for small or unaligned
+runs. That keeps 1080p presentation around 15 ms per frame instead of the
+~48 ms a plain `rep movsq` took. `SYS_GFX_PRESENT` waits for vertical retrace;
+if the retrace bit never toggles (as in QEMU's headless VGA), the kernel
+disables the wait after one probe. Interrupts are enabled during the copy so
+PIT ticks and serial input are not lost while the frame is in flight. Commands
+call `SYS_GFX_ENTER`, draw with `commands/lib/src/gfx.rs`, and hand the screen
+back with `SYS_GFX_LEAVE`.
 
 The PC speaker runs from PIT channel 2 and is gated through port `0x61`, so it
 needs no sound-card driver. QEMU only emulates it when an audio backend is
@@ -252,12 +278,14 @@ checked for the sync bit, overflow bits are recorded, deltas are signed 8-bit
 values, and the position is clamped to the framebuffer. The wheel count
 accumulates.
 
-The cursor is a 12×19 white-on-black arrow. During `graphics::present()` the
-kernel saves the pixels underneath it, draws the arrow, copies the frame, and
-then restores the saved pixels, so commands never see the cursor in their own
-drawing surface. `graphics::clear()` resets the saved area, and the shell's
-idle loop repaints the console when the mouse moves, which makes the arrow
-work over the text console too.
+The cursor is a 12×19 white-on-black arrow. During a present the kernel saves
+the pixels underneath it, draws the arrow, copies the frame, and then restores
+the saved pixels, so commands never see the cursor in their own drawing
+surface. When the arrow moves, the rectangle it used to cover is marked dirty
+too, so the old arrow is repainted instead of being left behind.
+`graphics::clear()` resets the saved area, and the shell's idle loop repaints
+the console when the mouse moves, which makes the arrow work over the text
+console too.
 
 `SYS_MOUSE_STATE` returns a `MouseState` with the absolute position, the last
 delta, accumulated wheel ticks, button bits, packet count, and feature flags.
@@ -307,7 +335,7 @@ python tools/test_ps2_shared.py
 | `test_iso.py` | parses the ISO structures without booting |
 | `test_extra.py` | PS/2 keyboard input, history recall, reboot, and aliases |
 | `test_vmdk.py` | boots the generated VMware disk |
-| `test_gfx_modes.py` | forces the 800×600 and VGA text fallbacks |
+| `test_gfx_modes.py` | forces the 1080p default, 1280×720 and 800×600 fallbacks, checks 1080p frame rate, and checks the VGA text fallback |
 | `test_audio.py` | captures a WAV and checks the 880 Hz and 440 Hz tones |
 | `test_mouse.py` | cursor, movement, button indicators, canvas, and wheel |
 | `test_ps2_shared.py` | keyboard and mouse traffic interleaved |
@@ -328,7 +356,8 @@ python tools/show_vga.py build/vga.bin       # VGA text fallback
 
 Boots take about 0.2 seconds under QEMU here. The ISO has run with 512 MiB,
 8 GiB, and 16 GiB of RAM; `meminfo` and `memtest` agree at each size.
-`gfxdemo 1` renders around 75 frames per second with no panics.
+`gfxdemo 5` renders about 290 frames in 5 seconds at 1920×1080×32 (~58 fps in
+headless QEMU, where vsync is unavailable) with no panics.
 
 One quirk worth knowing: the serial harness writes a byte every 2 ms. QEMU's
 stdio backend delivers a whole `write()` to the guest at once, which would
@@ -343,8 +372,9 @@ overrun the 16-byte UART FIFO. Pacing the input mimics a real 115200-baud line.
 - Audio is PC speaker only. No sound card, mixer, or streaming.
 - Mouse support is PS/2 only. No USB HID, no hot-plug, no wheel acceleration;
   the wheel value is a raw accumulated count.
-- Graphics uses VBE BIOS modes only: 1024×768×32, 800×600×32, or 640×480×32.
-  Without a suitable linear mode, the kernel falls back to 80×25 VGA text.
+- Graphics uses VBE BIOS modes only: 1920×1080, 1600×900, 1280×720,
+  1024×768, 800×600, or 640×480, all 32-bit true colour. Without a suitable
+  linear mode, the kernel falls back to 80×25 VGA text.
 - VMware was not installed during development, so boot was not run in VMware
   itself. The VMDK is a valid monolithic-sparse disk and the ISO is a standard
   El Torito image; both boot under QEMU's SeaBIOS, which follows the same BIOS

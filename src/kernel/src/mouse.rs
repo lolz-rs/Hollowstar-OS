@@ -471,6 +471,21 @@ pub fn cursor_draw() {
             return;
         }
 
+        // If the arrow moved, repaint the pixels it covered on the screen.
+        // cursor_restore() already put the original pixels back in the back
+        // buffer; marking the old rectangle makes the next present copy them.
+        if CURSOR_SAVE_W > 0
+            && CURSOR_SAVE_H > 0
+            && (CURSOR_SAVE_X != x || CURSOR_SAVE_Y != y)
+        {
+            crate::graphics::mark_dirty(
+                CURSOR_SAVE_X as u32,
+                CURSOR_SAVE_Y as u32,
+                CURSOR_SAVE_W as u32,
+                CURSOR_SAVE_H as u32,
+            );
+        }
+
         let stride = (info.pitch / 4) as usize;
         let base = info.back_buffer as *mut u32;
         let save = addr_of_mut!(CURSOR_SAVE) as *mut u32;
@@ -506,6 +521,31 @@ pub fn cursor_draw() {
             row += 1;
         }
         CURSOR_VISIBLE = true;
+        crate::graphics::mark_dirty(x as u32, y as u32, w as u32, h as u32);
+    }
+}
+
+/// Current cursor rectangle, or `None` when the mouse is unavailable.
+pub fn cursor_bounds() -> Option<(u32, u32, u32, u32)> {
+    unsafe {
+        if !AVAILABLE || !crate::graphics::active() {
+            return None;
+        }
+        let info = crate::graphics::info();
+        if info.width == 0 || info.height == 0 {
+            return None;
+        }
+        let width = info.width as i32;
+        let height = info.height as i32;
+        let x = X.clamp(0, width - 1);
+        let y = Y.clamp(0, height - 1);
+        let w = CURSOR_W.min(width - x);
+        let h = CURSOR_H.min(height - y);
+        if w <= 0 || h <= 0 {
+            None
+        } else {
+            Some((x as u32, y as u32, w as u32, h as u32))
+        }
     }
 }
 

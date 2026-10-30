@@ -68,6 +68,10 @@ pub fn dispatch(num: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
             graphics::present();
             0
         }
+        SYS_GFX_PRESENT_RECT => {
+            graphics::present_rect(a as u32, b as u32, c as u32, d as u32);
+            0
+        }
         SYS_GFX_VSYNC => {
             graphics::wait_vsync();
             0

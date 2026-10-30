@@ -152,7 +152,8 @@ def main():
             "cpuinfo": ["vendor", "brand", "x86_64"],
             "commands": ["/commands", "fetch", "echo"],
             "version": ["Hollowstar 0.1.0"],
-            "gfxinfo": ["framebuffer", "back buffer", "double buffered", "vsync"],
+            "gfxinfo": ["framebuffer", "back buffer", "double buffered", "vsync",
+                        "1920x1080x32"],
             "beep": ["beep:", "Hz", "PC speaker"],
             "gfxdemo": ["gfxdemo:", "frames", "x32"],
             "mouse": ["mouse:", "position", "packets"],
@@ -167,6 +168,15 @@ def main():
 
         if ("PANIC" in text) or ("CPU EXCEPTION" in text):
             failures.append("kernel panic or CPU exception in serial output")
+
+        # The 1080p default must not fall back to software-copy speeds. In
+        # headless QEMU vsync is unavailable, so the demo reports real frames.
+        import re
+        match = re.search(r"gfxdemo: (\d+) frames in \d+ ms, \d+x\d+x32, (\d+) fps", text)
+        if not match:
+            failures.append("could not parse gfxdemo frame rate")
+        elif int(match.group(2)) < 20:
+            failures.append(f"gfxdemo ran at only {match.group(2)} fps at 1080p")
 
         # Regression check: `clear` must blank the whole framebuffer, not just
         # the rows covered by a COLS*ROWS contiguous clear. Look at the lower

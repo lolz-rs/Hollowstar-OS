@@ -33,6 +33,8 @@ pub extern "C" fn _start(_args_ptr: *const u8, _args_len: usize) -> ! {
         "R {:#08x} G {:#08x} B {:#08x}\n",
         info.red_mask, info.green_mask, info.blue_mask
     );
+    hs::write("  colors      16.7M (8 bits per channel)\n");
+    hs::write("  present     dirty rectangles, 16-byte streaming copy\n");
     hs::write("  double buffered + vsync present: yes\n");
 
     hs::exit(0)

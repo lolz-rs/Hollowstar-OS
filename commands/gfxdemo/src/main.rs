@@ -88,6 +88,69 @@ fn draw_color_bars() {
     }
 }
 
+/// Smooth true-colour rainbow: 16.7 million colours instead of the old
+/// 16-colour text palette.
+fn draw_rainbow(t: u64) {
+    let w = gfx::width();
+    let phase = (t / 30) as u8;
+    let span = 6i32;
+    let mut x = 0i32;
+    while x < w {
+        let hue = phase.wrapping_add((x * 256 / w.max(1)) as u8);
+        gfx::fill_rect(x, 8, span, 6, gfx::hsv(hue, 255, 255));
+        x += span;
+    }
+}
+
+/// Translucent panel showing hue swatches and an alpha ramp, exercising the
+/// blend and HSV helpers in `gfx`.
+fn draw_truecolor_panel(t: u64) {
+    let w = gfx::width();
+    if w < 900 {
+        return;
+    }
+    let pw = 320;
+    let ph = 122;
+    let x = w - pw - 40;
+    let y = 40;
+    let tint = gfx::hsv((t / 40) as u8, 170, 255);
+    gfx::fill_rect_alpha(x, y, pw, ph, tint, 120);
+    gfx::rect_outline(x, y, pw, ph, 2, gfx::rgb(255, 255, 255));
+    gfx::text(x + 14, y + 12, "TRUE COLOUR", gfx::rgb(255, 255, 255), 1);
+
+    let swatches = 16i32;
+    let gap = 2i32;
+    let inner = pw - 28;
+    let sw = (inner - (swatches - 1) * gap) / swatches;
+    let mut i = 0i32;
+    while i < swatches {
+        let hue = ((i * 256) / swatches) as u8;
+        gfx::fill_rect(
+            x + 14 + i * (sw + gap),
+            y + 34,
+            sw,
+            30,
+            gfx::hsv(hue.wrapping_add((t / 25) as u8), 255, 255),
+        );
+        i += 1;
+    }
+
+    let steps = 8i32;
+    let aw = (inner - (steps - 1) * gap) / steps;
+    let mut a = 0i32;
+    while a < steps {
+        gfx::fill_rect_alpha(
+            x + 14 + a * (aw + gap),
+            y + 78,
+            aw,
+            26,
+            gfx::rgb(255, 255, 255),
+            (a as u32) * 255 / (steps as u32 - 1),
+        );
+        a += 1;
+    }
+}
+
 fn draw_stars(t: u64) {
     let w = gfx::width();
     let h = gfx::height();
@@ -303,10 +366,12 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
         let cy = info.height as i32 / 2 + 10;
         draw_background(elapsed);
         draw_color_bars();
+        draw_rainbow(elapsed);
         draw_stars(elapsed);
         draw_orbits(elapsed, cx, cy);
         draw_square(elapsed, cx, cy);
         draw_waves(elapsed);
+        draw_truecolor_panel(elapsed);
         draw_ui(elapsed, fps, frame);
         gfx::present();
 

@@ -3,19 +3,24 @@
 //! The kernel owns the back buffer and the console. Commands draw into the
 //! same buffer through the `SYS_GFX_*` calls and ask the kernel to present a
 //! finished frame, which keeps every update tear-free.
+//!
+//! Drawing tracks a dirty rectangle. The console presents only the cells that
+//! changed, and commands can pass their own rectangle to
+//! `SYS_GFX_PRESENT_RECT`, so a full-screen copy is only paid for when the
+//! whole screen actually changed.
 
 use core::arch::asm;
 use core::ptr;
 
 use hollowstar_common::{
-    BootInfo, GraphicsInfo, BACK_BUFFER_ADDR, BOOT_MAGIC, BOOT_VERSION, GFX_FLAG_AVAILABLE,
-    GFX_FLAG_FONT, GFX_FLAG_LINEAR,
+    BootInfo, GraphicsInfo, BACK_BUFFER_ADDR, BACK_BUFFER_MAX_BYTES, BOOT_MAGIC, BOOT_VERSION,
+    GFX_FLAG_AVAILABLE, GFX_FLAG_FONT, GFX_FLAG_LINEAR,
 };
 
 use crate::{io, memory};
 
-/// Sanity limit: 1024x768x32 is 3 MiB, 1920x1080x32 is 8.3 MiB.
-const MAX_FRAMEBUFFER_BYTES: u64 = 16 * 1024 * 1024;
+/// Sanity limit. 1920x1080x32 is 8.3 MiB; 3840x2160x32 is 33.2 MiB.
+const MAX_FRAMEBUFFER_BYTES: u64 = BACK_BUFFER_MAX_BYTES;
 
 static mut ACTIVE: bool = false;
 static mut CMD_ACTIVE: bool = false;
@@ -28,10 +33,22 @@ static mut BPP: u32 = 0;
 static mut FONT_ADDR: u64 = 0;
 static mut FONT_WIDTH: u32 = 8;
 static mut FONT_HEIGHT: u32 = 16;
+static mut BACK_ADDR: u64 = BACK_BUFFER_ADDR;
 static mut BACK_SIZE: u32 = 0;
 static mut RED_SHIFT: u32 = 16;
 static mut GREEN_SHIFT: u32 = 8;
 static mut BLUE_SHIFT: u32 = 0;
+
+static mut DIRTY: bool = false;
+static mut DIRTY_X0: u32 = 0;
+static mut DIRTY_Y0: u32 = 0;
+static mut DIRTY_X1: u32 = 0;
+static mut DIRTY_Y1: u32 = 0;
+
+/// Some firmware (and QEMU's headless VGA) never toggles the retrace bit.
+/// Probe once, then stop paying for a doomed wait on every frame.
+static mut VSYNC_PROBED: bool = false;
+static mut VSYNC_OK: bool = true;
 
 fn mask_shift(mask: u32) -> u32 {
     if mask == 0 {
@@ -89,8 +106,15 @@ pub fn init(info: &BootInfo) -> bool {
     {
         return false;
     }
-    let back_end = BACK_BUFFER_ADDR.saturating_add(size);
-    if !range_is_usable(BACK_BUFFER_ADDR, back_end) {
+    // Stage2 records the buffer it sized for this mode. Fall back to the
+    // fixed low-RAM address for older boot info.
+    let back_addr = if info.back_buffer_addr != 0 {
+        info.back_buffer_addr
+    } else {
+        BACK_BUFFER_ADDR
+    };
+    let back_end = back_addr.saturating_add(size);
+    if !range_is_usable(back_addr, back_end) {
         return false;
     }
 
@@ -104,6 +128,7 @@ pub fn init(info: &BootInfo) -> bool {
         FONT_ADDR = info.font_addr;
         FONT_WIDTH = font_width;
         FONT_HEIGHT = font_height;
+        BACK_ADDR = back_addr;
         BACK_SIZE = size as u32;
         RED_SHIFT = mask_shift(info.framebuffer_red_mask);
         GREEN_SHIFT = mask_shift(info.framebuffer_green_mask);
@@ -168,18 +193,13 @@ pub fn font_height() -> u32 {
     unsafe { FONT_HEIGHT }
 }
 
-#[inline]
-pub fn font_addr() -> u64 {
-    unsafe { FONT_ADDR }
-}
-
 pub fn info() -> GraphicsInfo {
     let mut gi = GraphicsInfo::zeroed();
     if !active() {
         return gi;
     }
     unsafe {
-        gi.back_buffer = BACK_BUFFER_ADDR;
+        gi.back_buffer = BACK_ADDR;
         gi.framebuffer = FB_ADDR;
         gi.width = WIDTH;
         gi.height = HEIGHT;
@@ -218,6 +238,57 @@ pub fn leave() {
     }
 }
 
+fn clear_dirty() {
+    unsafe {
+        DIRTY = false;
+    }
+}
+
+/// Mark a rectangle (x, y, w, h) as changed. Coordinates are clipped.
+pub fn mark_dirty(x: u32, y: u32, w: u32, h: u32) {
+    if !active() || w == 0 || h == 0 {
+        return;
+    }
+    let (width, height) = unsafe { (WIDTH, HEIGHT) };
+    if x >= width || y >= height {
+        return;
+    }
+    let x1 = x.saturating_add(w).min(width);
+    let y1 = y.saturating_add(h).min(height);
+    if x1 <= x || y1 <= y {
+        return;
+    }
+    unsafe {
+        if !DIRTY {
+            DIRTY = true;
+            DIRTY_X0 = x;
+            DIRTY_Y0 = y;
+            DIRTY_X1 = x1;
+            DIRTY_Y1 = y1;
+        } else {
+            DIRTY_X0 = DIRTY_X0.min(x);
+            DIRTY_Y0 = DIRTY_Y0.min(y);
+            DIRTY_X1 = DIRTY_X1.max(x1);
+            DIRTY_Y1 = DIRTY_Y1.max(y1);
+        }
+    }
+}
+
+fn dirty_rect() -> Option<(u32, u32, u32, u32)> {
+    unsafe {
+        if !DIRTY {
+            None
+        } else {
+            Some((
+                DIRTY_X0,
+                DIRTY_Y0,
+                DIRTY_X1 - DIRTY_X0,
+                DIRTY_Y1 - DIRTY_Y0,
+            ))
+        }
+    }
+}
+
 pub fn clear(color: u32) {
     if !active() {
         return;
@@ -226,7 +297,7 @@ pub fn clear(color: u32) {
     crate::mouse::cursor_reset();
     unsafe {
         let count = (BACK_SIZE as usize) / 4;
-        let dst = BACK_BUFFER_ADDR as *mut u32;
+        let dst = BACK_ADDR as *mut u32;
         asm!(
             "cld; rep stosd",
             inout("rdi") dst => _,
@@ -235,12 +306,27 @@ pub fn clear(color: u32) {
             options(nostack)
         );
     }
+    mark_dirty(0, 0, width(), height());
 }
 
 #[inline]
 pub fn rgb(r: u8, g: u8, b: u8) -> u32 {
     unsafe {
         ((r as u32) << RED_SHIFT) | ((g as u32) << GREEN_SHIFT) | ((b as u32) << BLUE_SHIFT)
+    }
+}
+
+/// Fill one span of 32-bit pixels.
+#[inline]
+fn fill_span(dst: *mut u32, count: usize, color: u32) {
+    unsafe {
+        asm!(
+            "cld; rep stosd",
+            inout("rdi") dst => _,
+            in("eax") color,
+            inout("rcx") count => _,
+            options(nostack)
+        );
     }
 }
 
@@ -257,86 +343,96 @@ pub fn fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
     if x1 <= x || y1 <= y {
         return;
     }
-    let count = (x1 - x) as usize;
     let stride = (pitch / 4) as usize;
-    for row in y..y1 {
-        let dst = unsafe {
-            (BACK_BUFFER_ADDR as *mut u32).add(row as usize * stride + x as usize)
-        };
-        unsafe {
+    let count = (x1 - x) as usize;
+    mark_dirty(x, y, x1 - x, y1 - y);
+    let base = unsafe { BACK_ADDR as *mut u32 };
+    if x == 0 && x1 == width {
+        // Whole rows are contiguous, so one store covers the rectangle.
+        let dst = unsafe { base.add(y as usize * stride) };
+        fill_span(dst, (y1 - y) as usize * stride, color);
+    } else {
+        let mut row = y;
+        while row < y1 {
+            let dst = unsafe { base.add(row as usize * stride + x as usize) };
+            fill_span(dst, count, color);
+            row += 1;
+        }
+    }
+}
+
+/// Copy `len` bytes. The caller has already clipped everything.
+#[inline]
+fn copy_bytes(src: *const u8, dst: *mut u8, len: usize) {
+    if len == 0 {
+        return;
+    }
+    unsafe {
+        // Large, aligned copies are the common case (a full 1080p frame).
+        // Sixteen-byte streaming stores beat `rep movsq` on emulated VGA
+        // memory, where each qword string iteration is expensive.
+        if len >= 4096 && ((src as usize) | (dst as usize)) & 15 == 0 {
+            let mut s = src;
+            let mut d = dst;
+            let mut n = len;
+            while n >= 64 {
+                asm!(
+                    "movdqu xmm0, [{s}]",
+                    "movdqu xmm1, [{s} + 16]",
+                    "movdqu xmm2, [{s} + 32]",
+                    "movdqu xmm3, [{s} + 48]",
+                    "movntdq [{d}], xmm0",
+                    "movntdq [{d} + 16], xmm1",
+                    "movntdq [{d} + 32], xmm2",
+                    "movntdq [{d} + 48], xmm3",
+                    s = in(reg) s,
+                    d = in(reg) d,
+                    out("xmm0") _,
+                    out("xmm1") _,
+                    out("xmm2") _,
+                    out("xmm3") _,
+                    options(nostack)
+                );
+                s = s.add(64);
+                d = d.add(64);
+                n -= 64;
+            }
+            while n >= 16 {
+                asm!(
+                    "movdqu xmm0, [{s}]",
+                    "movntdq [{d}], xmm0",
+                    s = in(reg) s,
+                    d = in(reg) d,
+                    out("xmm0") _,
+                    options(nostack)
+                );
+                s = s.add(16);
+                d = d.add(16);
+                n -= 16;
+            }
+            asm!("sfence", options(nostack, preserves_flags));
+            let mut tail_src = s;
+            let mut tail_dst = d;
+            let mut tail = n;
+            while tail > 0 {
+                *tail_dst = *tail_src;
+                tail_src = tail_src.add(1);
+                tail_dst = tail_dst.add(1);
+                tail -= 1;
+            }
+            return;
+        }
+
+        let qwords = len / 8;
+        if qwords != 0 {
             asm!(
-                "cld; rep stosd",
+                "cld; rep movsq",
+                inout("rsi") src => _,
                 inout("rdi") dst => _,
-                in("eax") color,
-                inout("rcx") count => _,
+                inout("rcx") qwords => _,
                 options(nostack)
             );
         }
-    }
-}
-
-#[inline]
-pub fn pixel(x: u32, y: u32, color: u32) {
-    if !active() {
-        return;
-    }
-    let (width, height, pitch) = unsafe { (WIDTH, HEIGHT, PITCH) };
-    if x >= width || y >= height {
-        return;
-    }
-    let stride = (pitch / 4) as usize;
-    unsafe {
-        ptr::write(
-            (BACK_BUFFER_ADDR as *mut u32).add(y as usize * stride + x as usize),
-            color,
-        );
-    }
-}
-
-/// Wait for the start of vertical blanking. VGA-compatible adapters expose
-/// the retrace bit on port 0x3DA; if it never changes, fall back to a bounded
-/// spin so a non-VGA framebuffer cannot hang the machine.
-pub fn wait_vsync() {
-    if !active() {
-        return;
-    }
-    let mut timeout = 0u32;
-    unsafe {
-        while (io::inb(0x3DA) & 0x08) != 0 {
-            timeout += 1;
-            if timeout > 4_000_000 {
-                return;
-            }
-        }
-        timeout = 0;
-        while (io::inb(0x3DA) & 0x08) == 0 {
-            timeout += 1;
-            if timeout > 4_000_000 {
-                return;
-            }
-        }
-    }
-}
-
-pub fn present() {
-    if !active() {
-        return;
-    }
-    // Draw the cursor for this frame, then put the canvas back.
-    crate::mouse::cursor_draw();
-    wait_vsync();
-    unsafe {
-        let src = BACK_BUFFER_ADDR as *const u8;
-        let dst = FB_ADDR as *mut u8;
-        let len = BACK_SIZE as usize;
-        let qwords = len / 8;
-        asm!(
-            "cld; rep movsq",
-            inout("rsi") src => _,
-            inout("rdi") dst => _,
-            inout("rcx") qwords => _,
-            options(nostack)
-        );
         let tail = len % 8;
         if tail != 0 {
             asm!(
@@ -348,5 +444,145 @@ pub fn present() {
             );
         }
     }
+}
+
+/// Wait for the start of vertical blanking. VGA-compatible adapters expose
+/// the retrace bit on port 0x3DA; if it never changes, fall back to a bounded
+/// spin so a non-VGA framebuffer cannot hang the machine.
+pub fn wait_vsync() {
+    if !active() {
+        return;
+    }
+    unsafe {
+        if VSYNC_PROBED && !VSYNC_OK {
+            return;
+        }
+    }
+    // QEMU's headless VGA and some firmware do not toggle the retrace bit.
+    // Bound the wait so a missing retrace costs a fraction of a frame instead
+    // of several milliseconds of trapped port reads.
+    const VSYNC_TIMEOUT: u32 = 100_000;
+    let mut timeout = 0u32;
+    unsafe {
+        while (io::inb(0x3DA) & 0x08) != 0 {
+            timeout += 1;
+            if timeout > VSYNC_TIMEOUT {
+                VSYNC_PROBED = true;
+                VSYNC_OK = false;
+                return;
+            }
+        }
+        timeout = 0;
+        while (io::inb(0x3DA) & 0x08) == 0 {
+            timeout += 1;
+            if timeout > VSYNC_TIMEOUT {
+                VSYNC_PROBED = true;
+                VSYNC_OK = false;
+                return;
+            }
+        }
+        VSYNC_PROBED = true;
+        VSYNC_OK = true;
+    }
+}
+
+/// Copy a rectangle from the back buffer to the framebuffer. The software
+/// cursor is composited for the duration of the copy and then removed from the
+/// back buffer, so commands never see it in their drawing surface.
+pub fn present_rect(x: u32, y: u32, w: u32, h: u32) {
+    if !active() {
+        return;
+    }
+    let (width, height, pitch, fb_pitch) = unsafe { (WIDTH, HEIGHT, PITCH, FB_PITCH) };
+    if x >= width || y >= height || w == 0 || h == 0 {
+        return;
+    }
+    let mut x0 = x;
+    let mut y0 = y;
+    let mut x1 = x.saturating_add(w).min(width);
+    let mut y1 = y.saturating_add(h).min(height);
+
+    crate::mouse::cursor_draw();
+    if let Some((cx, cy, cw, ch)) = crate::mouse::cursor_bounds() {
+        if cx < x1 && cy < y1 && cx + cw > x0 && cy + ch > y0 {
+            x0 = x0.min(cx);
+            y0 = y0.min(cy);
+            x1 = x1.max((cx + cw).min(width));
+            y1 = y1.max((cy + ch).min(height));
+        }
+    }
+    // cursor_draw() also marks the previous cursor rectangle dirty, so the
+    // old arrow is repainted instead of being left on the screen.
+    if let Some((dx, dy, dw, dh)) = dirty_rect() {
+        x0 = x0.min(dx);
+        y0 = y0.min(dy);
+        x1 = x1.max((dx + dw).min(width));
+        y1 = y1.max((dy + dh).min(height));
+    }
+    if x1 <= x0 || y1 <= y0 {
+        crate::mouse::cursor_restore();
+        clear_dirty();
+        return;
+    }
+
+    // A syscall gate enters with interrupts disabled. Presenting can take
+    // several milliseconds, so let the PIT and serial IRQs run while the copy
+    // is in flight; otherwise uptime and sleep drift under graphics load.
+    let flags = unsafe { io::read_rflags() };
+    let reenable = (flags & 0x200) == 0;
+    if reenable {
+        unsafe {
+            io::enable_interrupts();
+        }
+    }
+    wait_vsync();
+    let back = unsafe { BACK_ADDR as *const u8 };
+    let fb = unsafe { FB_ADDR as *mut u8 };
+    let rw = (x1 - x0) as usize;
+    if x0 == 0 && rw == width as usize && pitch == fb_pitch {
+        // Full rows: one contiguous copy, padding included.
+        let len = (y1 - y0) as usize * pitch as usize;
+        unsafe {
+            copy_bytes(
+                back.add(y0 as usize * pitch as usize),
+                fb.add(y0 as usize * fb_pitch as usize),
+                len,
+            );
+        }
+    } else {
+        let mut row = y0;
+        let row_bytes = rw * 4;
+        while row < y1 {
+            unsafe {
+                copy_bytes(
+                    back.add(row as usize * pitch as usize + x0 as usize * 4),
+                    fb.add(row as usize * fb_pitch as usize + x0 as usize * 4),
+                    row_bytes,
+                );
+            }
+            row += 1;
+        }
+    }
+    if reenable {
+        unsafe {
+            io::disable_interrupts();
+        }
+    }
     crate::mouse::cursor_restore();
+    clear_dirty();
+}
+
+/// Present everything that changed since the last present.
+pub fn present_dirty() {
+    if !active() {
+        return;
+    }
+    if let Some((x, y, w, h)) = dirty_rect() {
+        present_rect(x, y, w, h);
+    }
+}
+
+/// Present the whole frame.
+pub fn present() {
+    present_rect(0, 0, width(), height());
 }

@@ -17,8 +17,10 @@ const SHADOW_HEIGHT: usize = 25;
 /// writable, so keep the 80x25 text shadow in free low RAM instead. The VGA
 /// text fallback still uses 0xB8000 through vga.c.
 const SHADOW_ADDR: usize = 0x50000;
-const MAX_COLS: usize = 160;
-const MAX_ROWS: usize = 64;
+/// Cell capacity for the largest mode we support (3840x2160 gives a 480x135
+/// grid). The live grid is clamped to this; 1080p uses 240x67.
+const MAX_COLS: usize = 512;
+const MAX_ROWS: usize = 256;
 const MAX_CELLS: usize = MAX_COLS * MAX_ROWS;
 
 /// Standard VGA 16-colour palette, used to colour text in graphics mode.
@@ -137,39 +139,68 @@ fn shadow_put(x: usize, y: usize, ch: u8, attr: u8) {
 }
 
 fn draw_cell(x: usize, y: usize, ch: u8, attr: u8) {
+    draw_cell_impl(x, y, ch, attr, false);
+}
+
+/// Draw one cell. When `bg_prefilled` is set the back buffer is already the
+/// palette's black, so a black background does not need another fill. That
+/// turns a full-screen redraw into one buffer clear plus glyph pixels.
+fn draw_cell_impl(x: usize, y: usize, ch: u8, attr: u8, bg_prefilled: bool) {
     if !graphics_active() {
         return;
     }
     let fg = palette_color(attr & 0x0F);
     let bg = palette_color((attr >> 4) & 0x0F);
-    let fw = graphics::font_width().max(1);
-    let fh = graphics::font_height().max(1);
+    let info = graphics::info();
+    let fw = info.font_width.max(1);
+    let fh = info.font_height.max(1);
     let px = x as u32 * fw;
     let py = y as u32 * fh;
-    graphics::fill_rect(px, py, fw, fh, bg);
+    let stride = (info.pitch / 4) as usize;
+    let base = info.back_buffer as *mut u32;
 
-    if ch == b' ' || ch == 0 {
-        return;
-    }
-    let glyph_cols = fw.min(8);
-    let font = graphics::font_addr() as *const u8;
-    if font.is_null() {
-        return;
-    }
+    // Direct pixel stores keep a full redraw cheap: the console has thousands
+    // of cells, and a `rep stosd` per glyph run would dominate the frame.
     unsafe {
+        if !bg_prefilled || bg != 0 {
+            let mut row = 0;
+            while row < fh {
+                let dst = base.add((py + row) as usize * stride + px as usize);
+                let mut col = 0;
+                while col < fw {
+                    *dst.add(col as usize) = bg;
+                    col += 1;
+                }
+                row += 1;
+            }
+            graphics::mark_dirty(px, py, fw, fh);
+        }
+
+        if ch == b' ' || ch == 0 {
+            return;
+        }
+        let glyph_cols = fw.min(8);
+        let font = info.font_addr as *const u8;
+        if font.is_null() {
+            return;
+        }
         let glyph = font.add(ch as usize * fh as usize);
         let mut row = 0;
         while row < fh {
             let bits = *glyph.add(row as usize);
-            let mut col = 0;
-            while col < glyph_cols {
-                if (bits & (0x80 >> col)) != 0 {
-                    graphics::pixel(px + col, py + row, fg);
+            if bits != 0 {
+                let dst = base.add((py + row) as usize * stride + px as usize);
+                let mut col = 0;
+                while col < glyph_cols {
+                    if (bits & (0x80 >> col)) != 0 {
+                        *dst.add(col as usize) = fg;
+                    }
+                    col += 1;
                 }
-                col += 1;
             }
             row += 1;
         }
+        graphics::mark_dirty(px, py, fw, fh);
     }
 }
 
@@ -177,13 +208,16 @@ fn redraw_all() {
     if !graphics_active() {
         return;
     }
+    // One clear covers the whole back buffer, including the partial last row
+    // that the text grid does not reach.
+    graphics::clear(0);
     unsafe {
         let mut y = 0;
         while y < ROWS {
             let mut x = 0;
             while x < COLS {
                 let cell = CELLS[y * MAX_COLS + x];
-                draw_cell(x, y, (cell & 0xFF) as u8, (cell >> 8) as u8);
+                draw_cell_impl(x, y, (cell & 0xFF) as u8, (cell >> 8) as u8, true);
                 x += 1;
             }
             y += 1;
@@ -340,10 +374,9 @@ pub fn clear() {
     if graphics_active() {
         clear_cells();
         shadow_clear();
-        // Blank the entire back buffer first: the text grid may not cover the
-        // last partial row (for example 800x600 with a 16-pixel font), and a
-        // previous graphics command could have left pixels there.
-        graphics::clear(0);
+        // redraw_all() blanks the whole back buffer first: the text grid may
+        // not cover the last partial row (for example 1080 with a 16-pixel
+        // font), and a previous graphics command could have left pixels there.
         redraw_all();
         flush();
     } else {
@@ -421,7 +454,7 @@ pub fn flush() {
         }
     }
     draw_cursor();
-    graphics::present();
+    graphics::present_dirty();
 }
 
 pub fn enter_graphics_command() -> bool {
@@ -437,7 +470,6 @@ pub fn leave_graphics_command() {
     }
     graphics::leave();
     // The command may have drawn into margins the text grid does not cover.
-    graphics::clear(0);
     redraw_all();
     flush();
 }
