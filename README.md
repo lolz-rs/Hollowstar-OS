@@ -20,6 +20,11 @@ Hollowstar> fetch
     #               #
 ```
 
+## Future Plans
+
+- Add a desktop enviornment
+- port doom
+  
 ## Stuff it can do
 
 - Boots from a disk image or an ISO
