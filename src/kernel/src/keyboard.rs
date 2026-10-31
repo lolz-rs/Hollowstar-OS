@@ -88,6 +88,8 @@ fn handle_scancode(scancode: u8) {
                     0x4D => push(0x83), // right
                     0x47 => push(0x84), // home
                     0x4F => push(0x85), // end
+                    0x49 => push(0x86), // page up
+                    0x51 => push(0x87), // page down
                     0x53 => push(0x7F), // delete
                     _ => {}
                 }

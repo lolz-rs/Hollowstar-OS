@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cat"
+version = "0.1.0"
+dependencies = [
+ "hollowstar",
+]
+
+[[package]]
 name = "clear"
 version = "0.1.0"
 dependencies = [
@@ -84,6 +91,13 @@ name = "hollowstar-common"
 version = "0.1.0"
 
 [[package]]
+name = "ls"
+version = "0.1.0"
+dependencies = [
+ "hollowstar",
+]
+
+[[package]]
 name = "meminfo"
 version = "0.1.0"
 dependencies = [
@@ -112,7 +126,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nano"
+version = "0.1.0"
+dependencies = [
+ "hollowstar",
+]
+
+[[package]]
 name = "reboot"
+version = "0.1.0"
+dependencies = [
+ "hollowstar",
+]
+
+[[package]]
+name = "rm"
 version = "0.1.0"
 dependencies = [
  "hollowstar",

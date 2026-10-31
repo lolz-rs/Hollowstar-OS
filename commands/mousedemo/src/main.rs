@@ -2,7 +2,10 @@
 #![no_main]
 
 //! Mouse demo: button indicators, position readouts, and a drawing canvas.
-//! Left draws, right clears, middle cycles the brush, ESC/Q exits.
+//! Left draws, right clears, middle cycles the brush, S saves the canvas as a
+//! PPM preview, and ESC/Q exits.
+
+#![allow(static_mut_refs)]
 
 use hollowstar as hs;
 use hs::gfx;
@@ -247,7 +250,7 @@ fn draw_static(l: &Layout) {
     gfx::fill_rect(0, l.top_h - 2, w, 2, accent());
     gfx::text(14, 6, "MOUSE DEMO", white(), 2);
 
-    let hint = "L DRAW   R CLEAR   M BRUSH   ESC/Q QUIT";
+    let hint = "L DRAW   R CLEAR   M BRUSH   S SAVE   ESC/Q QUIT";
     let hx = (w - gfx::text_width(hint, 1) - 14).max(14);
     gfx::text(hx, 14, hint, dim(), 1);
 
@@ -413,6 +416,7 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
     if args == "help" || args == "-h" || args == "--help" {
         hs::write("usage: mousedemo\n");
         hs::write("  Left draws, right clears the canvas, middle cycles the brush size.\n");
+        hs::write("  S saves a downscaled preview as canvas.ppm (128x80 max).\n");
         hs::write("  ESC or Q exits. The cursor is drawn by the kernel mouse driver.\n");
         hs::exit(0);
     }
@@ -435,6 +439,7 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
     let mut brush = 1i32;
     let mut last: Option<(i32, i32)> = None;
     let mut frames = 0u64;
+    let mut saved: Option<(i32, i32)> = None;
 
     draw_buttons(&l, &state);
     draw_info(&l, &state, brush);
@@ -445,6 +450,19 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
         if let Some(key) = hs::key_poll() {
             if key == 0x1B || key == b'q' || key == b'Q' {
                 break;
+            }
+            if key == b's' || key == b'S' {
+                match save_canvas(&l) {
+                    Some((w, h)) => {
+                        saved = Some((w, h));
+                        draw_save_status("saved canvas.ppm", true);
+                    }
+                    None => {
+                        saved = None;
+                        draw_save_status("save failed", false);
+                    }
+                }
+                gfx::present();
             }
         }
 
@@ -502,7 +520,137 @@ pub extern "C" fn _start(args_ptr: *const u8, args_len: usize) -> ! {
         hs::write(" (mouse not detected)");
     }
     hs::write("\n");
+    if let Some((w, h)) = saved {
+        hs::print!("mousedemo: saved canvas.ppm ({}x{})\n", w, h);
+    }
     hs::exit(0)
+}
+
+const SAVE_W: i32 = 128;
+const SAVE_H: i32 = 80;
+const SAVE_BUF_LEN: usize = 16 + (SAVE_W as usize) * (SAVE_H as usize) * 3;
+static mut SAVE_BUF: [u8; SAVE_BUF_LEN] = [0; SAVE_BUF_LEN];
+
+fn put_u32(buf: &mut [u8], mut pos: usize, mut value: u32) -> usize {
+    let mut digits = [0u8; 10];
+    let mut n = 0usize;
+    if value == 0 {
+        digits[0] = b'0';
+        n = 1;
+    } else {
+        while value > 0 {
+            digits[n] = b'0' + (value % 10) as u8;
+            value /= 10;
+            n += 1;
+        }
+    }
+    let mut i = 0usize;
+    while i < n {
+        buf[pos] = digits[n - 1 - i];
+        pos += 1;
+        i += 1;
+    }
+    pos
+}
+
+/// Scale a framebuffer channel to 0..255. The back buffer is 32-bit true
+/// colour today, but this also handles 5-6-5 masks correctly.
+fn channel(pixel: u32, mask: u32) -> u8 {
+    if mask == 0 {
+        return 0;
+    }
+    let shift = mask.trailing_zeros();
+    let max = mask >> shift;
+    if max == 0 {
+        return 0;
+    }
+    let value = (pixel & mask) >> shift;
+    ((value * 255 + max / 2) / max) as u8
+}
+
+fn draw_save_status(message: &str, ok: bool) {
+    let w = gfx::width();
+    let tw = gfx::text_width(message, 1);
+    let x = (w - tw - 14).max(14);
+    gfx::fill_rect(x - 4, 8, tw + 8, 30, top_bg());
+    let color = if ok {
+        gfx::rgb(95, 215, 120)
+    } else {
+        gfx::rgb(235, 70, 75)
+    };
+    gfx::text(x, 14, message, color, 1);
+}
+
+fn save_canvas(l: &Layout) -> Option<(i32, i32)> {
+    if l.canvas_w <= 0 || l.canvas_h <= 0 {
+        return None;
+    }
+    let info = gfx::info();
+    if info.back_buffer == 0 || info.width == 0 || info.height == 0 {
+        return None;
+    }
+
+    let out_w = SAVE_W;
+    let out_h = (SAVE_W * l.canvas_h / l.canvas_w).clamp(1, SAVE_H);
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(SAVE_BUF) as *mut u8,
+            SAVE_BUF_LEN,
+        )
+    };
+
+    let mut n = 0usize;
+    for &b in b"P6\n" {
+        buf[n] = b;
+        n += 1;
+    }
+    n = put_u32(buf, n, out_w as u32);
+    buf[n] = b' ';
+    n += 1;
+    n = put_u32(buf, n, out_h as u32);
+    buf[n] = b'\n';
+    n += 1;
+    for &b in b"255\n" {
+        buf[n] = b;
+        n += 1;
+    }
+
+    let stride = (info.pitch / 4) as usize;
+    let base = info.back_buffer as *const u32;
+    let mut y = 0i32;
+    while y < out_h {
+        let mut x = 0i32;
+        while x < out_w {
+            let sx = l.canvas_x + x * l.canvas_w / out_w;
+            let sy = l.canvas_y + y * l.canvas_h / out_h;
+            let pixel = if sx >= 0
+                && sy >= 0
+                && (sx as u32) < info.width
+                && (sy as u32) < info.height
+            {
+                unsafe { *base.add(sy as usize * stride + sx as usize) }
+            } else {
+                0
+            };
+            buf[n] = channel(pixel, info.red_mask);
+            buf[n + 1] = channel(pixel, info.green_mask);
+            buf[n + 2] = channel(pixel, info.blue_mask);
+            n += 3;
+            x += 1;
+        }
+        y += 1;
+    }
+
+    let Some(fd) = hs::fs_open("canvas.ppm", hs::FS_WRITE) else {
+        return None;
+    };
+    let wrote = hs::fs_write_all(fd, &buf[..n]).unwrap_or(0);
+    hs::fs_close(fd);
+    if wrote == n {
+        Some((out_w, out_h))
+    } else {
+        None
+    }
 }
 
 #[panic_handler]

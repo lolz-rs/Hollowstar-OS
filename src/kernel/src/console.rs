@@ -78,6 +78,9 @@ static mut DRAWN_Y: usize = 0;
 static mut VIEW: usize = 0;
 static mut SCROLL_COUNT: usize = 0;
 static mut SCROLL_HEAD: usize = 0;
+/// True when the next character would start a fresh line. The shell uses this
+/// so a command that does not end with a newline cannot swallow the prompt.
+static mut LINE_START: bool = true;
 
 #[inline]
 unsafe fn cell_get(index: usize) -> Cell {
@@ -571,6 +574,7 @@ pub fn set_present_ready(ready: bool) {
 pub fn clear() {
     unsafe {
         VIEW = 0;
+        LINE_START = true;
     }
     if graphics_active() {
         clear_cells();
@@ -618,6 +622,9 @@ pub fn write_byte(byte: u8) {
             vga_putc(byte as i8);
         }
     }
+    unsafe {
+        LINE_START = matches!(byte, b'\n' | b'\r');
+    }
     match byte {
         b'\n' => {
             serial::write_byte(b'\r');
@@ -633,6 +640,15 @@ pub fn write_byte(byte: u8) {
 pub fn write_bytes(bytes: &[u8]) {
     for &byte in bytes {
         write_byte(byte);
+    }
+}
+
+/// Make sure the next output starts at column zero. Used between commands so
+/// `echo -n`, `cat`, and other output without a trailing newline still leave a
+/// clean prompt.
+pub fn ensure_newline() {
+    if !unsafe { LINE_START } {
+        write_byte(b'\n');
     }
 }
 

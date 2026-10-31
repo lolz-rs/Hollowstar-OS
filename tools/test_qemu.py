@@ -157,7 +157,7 @@ def main():
             "beep": ["beep:", "Hz", "PC speaker"],
             "gfxdemo": ["gfxdemo:", "frames", "x32"],
             "mouse": ["mouse:", "position", "packets"],
-            "bogus": ["bogus: command not found in /commands"],
+            "bogus": ["bogus: command not found"],
             "clear": ["after clear"],
             "halt": ["System halted."],
         }

@@ -21,6 +21,10 @@ members = [
     "beep",
     "mousedemo",
     "mouse",
+    "ls",
+    "cat",
+    "rm",
+    "nano",
 ]
 
 [profile.release]

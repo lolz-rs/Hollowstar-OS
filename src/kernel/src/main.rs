@@ -16,6 +16,7 @@ mod memory;
 mod mouse;
 mod pic;
 mod pit;
+mod ramdisk;
 mod serial;
 mod shell;
 mod syscall;
@@ -55,6 +56,7 @@ pub extern "C" fn kernel_main(boot_info: *const BootInfo) -> ! {
     pit::init();
     audio::init();
     mouse::init();
+    ramdisk::init();
 
     if !archive::init() {
         console::set_color(color::RED);

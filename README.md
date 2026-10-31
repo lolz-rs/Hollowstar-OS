@@ -9,7 +9,7 @@ Hollowstar> fetch
           #   #           uptime   0s
          #     #          cpu      QEMU Virtual CPU version 2.5+
 #########       ######### memory   511 MiB
- ##                   ##  commands 19
+ ##                   ##  commands 23
    ##               ##
      ##           ##
        #    #    #
@@ -63,6 +63,18 @@ The ISO is `build/hollowstar.iso`. VMware can open `build/Hollowstar.vmx`.
 ## Commands
 
 Type `help`. The fun ones are `fetch`, `gfxdemo`, `mousedemo`, and `beep`. `halt` turns it off. `exit` does the same thing.
+
+There is a flat RAM disk too. It lives in memory, so a reboot clears it. It holds 32 files of up to 64 KiB each.
+
+- `ls` shows a sorted table with sizes and free space. `ls -1` prints names only.
+- `cat [-n] file...` prints files; `-n` numbers the lines.
+- `echo hi > note.txt` writes a file, `>>` appends, `-n` drops the newline, and `-e` understands `\n`, `\t`, `\r`, `\\`, `\0`, and `\xHH`.
+- `rm [-f] [-v] file...` deletes files. It is quiet unless you ask for `-v`.
+- `nano [file]` is a small editor. Arrows move, Home/End jump, Page Up/Down scroll, Ctrl+K cuts a line, Ctrl+U pastes, Ctrl+S saves, and Ctrl+X exits. If the buffer is modified, Ctrl+X asks once before throwing it away.
+- `> file` on its own creates or empties a file. A redirect is only opened after the command name resolves, so a typo cannot wipe a file.
+- In `mousedemo`, S saves a 128x80 PPM preview as `canvas.ppm`.
+
+Errors from the shell start with `hsh:`; command errors go to stderr and show up in red.
 
 ## How it works (kinda)
 

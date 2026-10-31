@@ -283,3 +283,29 @@ pub const SYS_AUDIO_BEEP: u64 = 23;
 pub const SYS_KEY_POLL: u64 = 24;
 pub const SYS_MOUSE_STATE: u64 = 25;
 pub const SYS_GFX_PRESENT_RECT: u64 = 26;
+pub const SYS_FS_OPEN: u64 = 27;
+pub const SYS_FS_CLOSE: u64 = 28;
+pub const SYS_FS_READ: u64 = 29;
+pub const SYS_FS_WRITE: u64 = 30;
+pub const SYS_FS_LIST: u64 = 31;
+pub const SYS_FS_COUNT: u64 = 32;
+pub const SYS_FS_REMOVE: u64 = 33;
+pub const SYS_CURSOR: u64 = 34;
+/// Returns `(columns << 32) | rows` for the active text console.
+pub const SYS_CONSOLE_INFO: u64 = 35;
+
+/// Open for reading. Fails if the file does not exist.
+pub const FS_READ: u64 = 1;
+/// Create or replace. Without `FS_APPEND` the file is truncated.
+pub const FS_WRITE: u64 = 2;
+/// Write at the end instead of replacing the file. Implies `FS_WRITE`.
+pub const FS_APPEND: u64 = 4;
+
+/// The RAM disk is flat and fixed-size. These limits are shared with commands
+/// so `ls`, `nano`, and friends can validate input before calling the kernel.
+pub const FS_MAX_FILES: usize = 32;
+pub const FS_MAX_NAME: usize = 28;
+pub const FS_MAX_FILE_BYTES: usize = 64 * 1024;
+pub const FS_MAX_OPEN: usize = 8;
+/// Total bytes available on the RAM disk.
+pub const FS_CAPACITY_BYTES: usize = FS_MAX_FILES * FS_MAX_FILE_BYTES;

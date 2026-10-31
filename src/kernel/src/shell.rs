@@ -365,7 +365,7 @@ pub fn read_line(prompt: bool) -> usize {
                     console::flush();
                 }
             }
-            0x84 | 0x85 => {}
+            0x84 | 0x85 | 0x86 | 0x87 => {}
             0x20..=0x7E => {
                 if len + 1 < LINE_MAX {
                     let mut i = len;
@@ -437,15 +437,78 @@ pub fn read_line_into(out: &mut [u8]) -> usize {
     }
 }
 
+fn trim(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && (bytes[start] == b' ' || bytes[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
+fn unquote(bytes: &[u8]) -> &[u8] {
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &bytes[1..bytes.len() - 1];
+        }
+    }
+    bytes
+}
+
+/// Split `echo hi > note.txt` into the command and an optional redirect.
+/// `>` inside single or double quotes is just text.
+fn split_redirect(line: &[u8]) -> (&[u8], Option<(&[u8], bool)>) {
+    let mut quote = 0u8;
+    let mut i = 0;
+    while i < line.len() {
+        let byte = line[i];
+        if quote == 0 && (byte == b'"' || byte == b'\'') {
+            quote = byte;
+        } else if quote != 0 && byte == quote {
+            quote = 0;
+        } else if quote == 0 && byte == b'>' {
+            let append = i + 1 < line.len() && line[i + 1] == b'>';
+            let skip = if append { 2 } else { 1 };
+            let filename = unquote(trim(&line[i + skip..]));
+            return (trim(&line[..i]), Some((filename, append)));
+        }
+        i += 1;
+    }
+    (trim(line), None)
+}
+
+fn print_error(prefix: &str, detail: &[u8], message: &str) {
+    console::set_color(color::RED);
+    console::write_str("hsh: ");
+    if !prefix.is_empty() {
+        console::write_str(prefix);
+        console::write_str(": ");
+    }
+    console::write_bytes(detail);
+    console::write_str(message);
+    console::set_color(color::WHITE);
+}
+
+fn redirect_flags(append: bool) -> u64 {
+    if append {
+        hollowstar_common::FS_WRITE | hollowstar_common::FS_APPEND
+    } else {
+        hollowstar_common::FS_WRITE
+    }
+}
+
 fn execute(line: &[u8]) {
+    let (line, redirect) = split_redirect(line);
+
     let mut start = 0usize;
     while start < line.len() && (line[start] == b' ' || line[start] == b'\t') {
         start += 1;
     }
-    if start >= line.len() {
-        return;
-    }
-
     let mut name_end = start;
     while name_end < line.len() && line[name_end] != b' ' && line[name_end] != b'\t' {
         name_end += 1;
@@ -465,6 +528,24 @@ fn execute(line: &[u8]) {
     let mut name = &line[start..name_end];
     let args = &line[args_start..args_end];
 
+    // `> file` with no command is a valid way to create or empty a file.
+    if name.is_empty() {
+        if let Some((filename, append)) = redirect {
+            if filename.is_empty() {
+                print_error("", b"", "missing file name after >\n");
+                return;
+            }
+            let fd = crate::ramdisk::open(filename, redirect_flags(append));
+            if fd == 0 {
+                print_error("", filename, ": cannot open for writing\n");
+                return;
+            }
+            crate::ramdisk::close(fd);
+        }
+        crate::ramdisk::command_done();
+        return;
+    }
+
     if name == &b"fastfetch"[..] || name == &b"neofetch"[..] {
         name = &b"fetch"[..];
     } else if name == &b"shutdown"[..] {
@@ -474,12 +555,28 @@ fn execute(line: &[u8]) {
         syscall::halt_now();
     }
 
+    // Resolve the command before touching the redirect target. A typo like
+    // `nosuchcmd > notes.txt` must not create or truncate notes.txt.
     let Some(entry) = archive::find(name) else {
-        console::write_str("hsh: ");
-        console::write_bytes(name);
-        console::write_str(": command not found in /commands\n");
+        print_error("", name, ": command not found\n");
+        crate::ramdisk::command_done();
         return;
     };
+
+    if let Some((filename, append)) = redirect {
+        if filename.is_empty() {
+            print_error("", b"", "missing file name after >\n");
+            crate::ramdisk::command_done();
+            return;
+        }
+        let fd = crate::ramdisk::open(filename, redirect_flags(append));
+        if fd == 0 {
+            print_error("", filename, ": cannot open for writing\n");
+            crate::ramdisk::command_done();
+            return;
+        }
+        crate::ramdisk::set_redirect(fd);
+    }
 
     let args_buffer = args_ptr();
     let args_len = args.len().min(ARGS_MAX - 1);
@@ -488,9 +585,8 @@ fn execute(line: &[u8]) {
     }
 
     let Some(entry_point) = elf::load(entry) else {
-        console::write_str("hsh: ");
-        console::write_bytes(name);
-        console::write_str(": failed to load from /commands\n");
+        print_error("", name, ": failed to load from /commands\n");
+        crate::ramdisk::command_done();
         return;
     };
 
@@ -517,6 +613,7 @@ pub fn run() -> ! {
     println!();
 
     loop {
+        console::ensure_newline();
         let len = read_line(true);
         if len > 0 {
             let buffer = line_ptr();

@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use hollowstar_common::color;
 use hollowstar_common::*;
 
-use crate::{archive, audio, console, cpu, graphics, io, keyboard, memory, mouse, pit, shell};
+use crate::{archive, audio, console, cpu, graphics, io, keyboard, memory, mouse, pit, ramdisk, shell};
 
 static COMMAND_EXIT_CODE: AtomicU64 = AtomicU64::new(0);
 /// Set when Ctrl+C should stop the running command.
@@ -75,6 +75,7 @@ pub fn abort_command() -> ! {
     SYSCALL_DEPTH.store(0, Ordering::SeqCst);
     disarm();
     COMMAND_EXIT_CODE.store(130, Ordering::Relaxed);
+    ramdisk::command_done();
     audio::off();
     console::finish_command();
     console::set_color(color::WHITE);
@@ -90,6 +91,7 @@ pub fn command_finished() {
     ABORTING.store(false, Ordering::SeqCst);
     SYSCALL_DEPTH.store(0, Ordering::SeqCst);
     disarm();
+    ramdisk::command_done();
 }
 
 pub fn dispatch(num: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
@@ -130,7 +132,9 @@ pub fn dispatch(num: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
         }
         SYS_GETCHAR => keyboard::read_char() as u64,
         SYS_PUTCHAR => {
-            console::write_byte(a as u8);
+            if !ramdisk::redirect_byte(a as u8) {
+                console::write_byte(a as u8);
+            }
             0
         }
         SYS_WRITE_COLOR => sys_write_color(a as u32, b, c),
@@ -176,6 +180,22 @@ pub fn dispatch(num: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
             .or_else(|| crate::serial::poll())
             .unwrap_or(0) as u64,
         SYS_MOUSE_STATE => sys_mouse_state(a),
+        SYS_FS_OPEN => ramdisk::open(user_bytes(a, b), c),
+        SYS_FS_CLOSE => {
+            ramdisk::close(a);
+            0
+        }
+        SYS_FS_READ => sys_fs_read(a, b, c),
+        SYS_FS_WRITE => sys_fs_write(a, b, c),
+        SYS_FS_LIST => ramdisk::list(a, b, c, d),
+        SYS_FS_COUNT => ramdisk::count(),
+        SYS_FS_REMOVE => ramdisk::remove(user_bytes(a, b)),
+        SYS_CURSOR => {
+            console::set_cursor(a as usize, b as usize);
+            console::flush();
+            0
+        }
+        SYS_CONSOLE_INFO => ((console::columns() as u64) << 32) | console::rows() as u64,
         _ => u64::MAX,
     };
     if cancel_requested() {
@@ -214,12 +234,43 @@ fn sys_gfx_info(ptr: u64) -> u64 {
     }
 }
 
+fn user_bytes(ptr: u64, len: u64) -> &'static [u8] {
+    if ptr == 0 || len == 0 {
+        return &[];
+    }
+    let len = len.min(256) as usize;
+    unsafe { core::slice::from_raw_parts(ptr as *const u8, len) }
+}
+
+fn sys_fs_read(fd: u64, ptr: u64, len: u64) -> u64 {
+    if ptr == 0 {
+        return u64::MAX;
+    }
+    let len = len.min(1024 * 1024) as usize;
+    let buf = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) };
+    ramdisk::read(fd, buf)
+}
+
+fn sys_fs_write(fd: u64, ptr: u64, len: u64) -> u64 {
+    if ptr == 0 || len == 0 {
+        return 0;
+    }
+    let len = len.min(1024 * 1024) as usize;
+    let buf = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+    ramdisk::write(fd, buf)
+}
+
 fn sys_write(fd: u64, ptr: u64, len: u64) -> u64 {
     if ptr == 0 || len == 0 {
         return 0;
     }
     let len = len.min(1024 * 1024) as usize;
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+    if fd == 1 {
+        if let Some(n) = ramdisk::redirect_write(bytes) {
+            return n;
+        }
+    }
     if fd == 2 {
         let old = console::get_color();
         console::set_color(color::RED);
@@ -237,6 +288,9 @@ fn sys_write_color(value: u32, ptr: u64, len: u64) -> u64 {
     }
     let len = len.min(1024 * 1024) as usize;
     let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+    if let Some(n) = ramdisk::redirect_write(bytes) {
+        return n;
+    }
     let old = console::get_color();
     console::set_color(value);
     console::write_bytes(bytes);
