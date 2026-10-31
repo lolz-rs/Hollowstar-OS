@@ -1,6 +1,6 @@
 # Hollowstar
 
-Hollowstar is a small operating system I wrote for x86_64. It has its own bootloader, so there's no GRUB and no Linux under it. You boot it and get a shell.
+Hollowstar is an OS I wrote from scratch for x86_64. No GRUB, no Linux, it just boots into a shell.
 
 ```
 Hollowstar> fetch
@@ -20,26 +20,29 @@ Hollowstar> fetch
     #               #
 ```
 
-## What it does
+## Stuff it can do
 
 - Boots from a disk image or an ISO
-- 1080p by default, and it drops to a smaller mode if the PC can't do that
-- True color. Text and graphics both use normal RGB, so millions of colors, not the old 16
-- Keyboard, mouse (wheel too), and PC speaker
-- Commands are separate Rust programs packed into the kernel
+- 1080p by default, smaller modes if the PC can't do that
+- True color. Text and graphics both use normal RGB, not the old 16 colors
+- Its own font, so it doesn't look like the BIOS text anymore
+- Keyboard and mouse, plus the PC speaker
+- Commands are separate little Rust programs packed into the kernel
 
-Code is in `src/`, commands are in `commands/`, and the build/test scripts are in `tools/`.
+The shell is pretty normal. Tab finishes command names. Left and right move the text caret. Up and down go through old commands. The mouse wheel scrolls back through stuff that already left the screen. Ctrl+C stops whatever is running.
+
+Code is in `src/`, commands are in `commands/`, build and test scripts are in `tools/`.
 
 ## Build
 
-The compilers are too big to put in git, so they live in `tools/` (nasm, clang, qemu). You also need Rust and Python.
+The compilers are huge so they aren't in git. Put nasm, clang, and qemu under `tools/`. You also need Rust and Python.
 
 ```powershell
 rustup target add x86_64-unknown-none
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-That writes `build/hollowstar.img` and `build/hollowstar.iso`. If you want a different default resolution:
+That makes `build/hollowstar.img` and `build/hollowstar.iso`. If you want a different resolution:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1 -GfxWidth 2560 -GfxHeight 1440
@@ -53,21 +56,21 @@ tools\qemu\qemu-system-x86_64.exe -m 512 `
     -audiodev dsound,id=snd0 -machine pc,pcspk-audiodev=snd0
 ```
 
-The audio flags are just so `beep` makes noise. Drop them if you don't care.
+The audio part is only so `beep` makes noise. You can leave it off.
 
-ISO is `build/hollowstar.iso`. VMware can open `build/Hollowstar.vmx`. Serial is COM1 if you add `-display none -serial stdio`.
+The ISO is `build/hollowstar.iso`. VMware can open `build/Hollowstar.vmx`.
 
 ## Commands
 
-Type `help` and it lists them. The ones I actually use are `fetch`, `gfxdemo`, `gfxinfo`, `mousedemo`, `mouse`, and `beep`. `halt` turns the machine off. `fastfetch` is just `fetch`, and `exit` is `halt`.
+Type `help`. The fun ones are `fetch`, `gfxdemo`, `mousedemo`, and `beep`. `halt` turns it off. `exit` does the same thing.
 
-## How it works
+## How it works (kinda)
 
-The boot sector loads stage2. Stage2 asks the BIOS for a graphics mode (1080p first), turns on long mode, and jumps to the kernel. The kernel sets up interrupts, the timer, the mouse, and then the shell.
+The boot sector loads stage2. Stage2 asks the BIOS for a graphics mode, then jumps into the kernel. The kernel sets up interrupts, the mouse, and the shell.
 
-Commands are little ELF programs. The shell loads one, runs it, and comes back when it exits. They talk to the kernel with `int 0x80`. Colors are just `0xRRGGBB`. Drawing goes into a back buffer and gets copied to the screen, so it doesn't tear as bad. `gfxdemo` is the stress test for that.
+Commands are ELF files. The shell loads one, runs it, and comes back when it exits or you hit Ctrl+C. They talk to the kernel with `int 0x80`. Drawing goes into a back buffer first so the screen doesn't tear as much.
 
-If graphics mode fails it falls back to the old VGA text screen.
+If graphics mode fails it just uses the old VGA text screen.
 
 ## Tests
 
@@ -75,4 +78,4 @@ If graphics mode fails it falls back to the old VGA text screen.
 python tools/test_qemu.py --qemu tools/qemu/qemu-system-x86_64.exe --image build/hollowstar.img --vga-out build/vga.bin
 ```
 
-That one boots it and runs the commands. The other scripts in `tools/` check graphics modes, the mouse, audio, and the ISO. I run them in QEMU.
+That boots it and runs the commands. The other scripts in `tools/` check graphics, the mouse, sound, and the ISO. I run all of this in QEMU.
