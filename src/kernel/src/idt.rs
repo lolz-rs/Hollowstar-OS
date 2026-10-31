@@ -131,19 +131,29 @@ pub extern "C" fn interrupt_handler(frame: *mut InterruptFrame) {
         33 => {
             keyboard::handle_irq();
             pic::eoi(1);
+            // EOI first. Aborting abandons this IRQ frame, same as SYS_EXIT
+            // abandons the syscall frame, but the PIC must not stay in service.
+            if syscall::take_immediate_abort() {
+                syscall::abort_command();
+            }
         }
         36 => {
             while serial::irq_pending() {
                 keyboard::handle_serial_byte(serial::read_byte());
             }
             pic::eoi(4);
+            if syscall::take_immediate_abort() {
+                syscall::abort_command();
+            }
         }
         44 => {
             mouse::handle_irq();
             pic::eoi(12);
         }
         0x80 => {
+            syscall::enter_syscall();
             frame.rax = syscall::dispatch(frame.rax, frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
+            syscall::leave_syscall();
         }
         other => {
             println!();

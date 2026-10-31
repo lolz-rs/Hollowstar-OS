@@ -584,6 +584,8 @@ pub fn polygon_outline(points: &[(i32, i32)], color: u32) {
     }
 }
 
+/// Draw text with the kernel's 14×24 font. `gfxdemo` and `mousedemo` use this,
+/// so they pick up the same glyphs as the console.
 pub fn text(x: i32, y: i32, text: &str, color: u32, scale: u32) {
     if !ready() {
         return;
@@ -605,20 +607,24 @@ pub fn text(x: i32, y: i32, text: &str, color: u32, scale: u32) {
             continue;
         }
         if b != b' ' {
+            let stride = ((fw as u32 + 7) / 8) as usize;
             unsafe {
-                let glyph = font.add(b as usize * fh as usize);
+                let glyph = font.add(b as usize * fh as usize * stride);
                 let mut row = 0;
                 while row < fh {
-                    let bits = *glyph.add(row as usize);
-                    let cols = fw.min(8);
-                    let mut col = 0;
-                    while col < cols {
-                        if (bits & (0x80 >> col)) == 0 {
+                    let mut col = 0u32;
+                    while col < fw {
+                        let bits = *glyph.add(row as usize * stride + (col / 8) as usize);
+                        if (bits & (0x80 >> (col % 8))) == 0 {
                             col += 1;
                             continue;
                         }
                         let start = col;
-                        while col < cols && (bits & (0x80 >> col)) != 0 {
+                        while col < fw {
+                            let bits = *glyph.add(row as usize * stride + (col / 8) as usize);
+                            if (bits & (0x80 >> (col % 8))) == 0 {
+                                break;
+                            }
                             col += 1;
                         }
                         fill_rect(

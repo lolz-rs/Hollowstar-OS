@@ -10,7 +10,6 @@
 //! whole screen actually changed.
 
 use core::arch::asm;
-use core::ptr;
 
 use hollowstar_common::{
     BootInfo, GraphicsInfo, BACK_BUFFER_ADDR, BACK_BUFFER_MAX_BYTES, BOOT_MAGIC, BOOT_VERSION,
@@ -76,8 +75,8 @@ pub fn init(info: &BootInfo) -> bool {
         return false;
     }
     let flags = info.graphics_flags;
-    if (flags & (GFX_FLAG_AVAILABLE | GFX_FLAG_LINEAR | GFX_FLAG_FONT))
-        != (GFX_FLAG_AVAILABLE | GFX_FLAG_LINEAR | GFX_FLAG_FONT)
+    if (flags & (GFX_FLAG_AVAILABLE | GFX_FLAG_LINEAR))
+        != (GFX_FLAG_AVAILABLE | GFX_FLAG_LINEAR)
     {
         return false;
     }
@@ -92,18 +91,6 @@ pub fn init(info: &BootInfo) -> bool {
     }
     let size = (info.framebuffer_pitch as u64) * (info.framebuffer_height as u64);
     if size == 0 || size > MAX_FRAMEBUFFER_BYTES {
-        return false;
-    }
-    let font_width = if info.font_width == 0 { 8 } else { info.font_width };
-    let font_height = if info.font_height == 0 {
-        16
-    } else {
-        info.font_height
-    };
-    // The font must be inside usable RAM so reading it cannot fault.
-    if !range_is_usable(info.font_addr, info.font_addr.saturating_add(4096))
-        || !font_is_sane(info.font_addr, font_width, font_height)
-    {
         return false;
     }
     // Stage2 records the buffer it sized for this mode. Fall back to the
@@ -125,9 +112,11 @@ pub fn init(info: &BootInfo) -> bool {
         HEIGHT = info.framebuffer_height;
         PITCH = info.framebuffer_pitch;
         BPP = info.framebuffer_bpp;
-        FONT_ADDR = info.font_addr;
-        FONT_WIDTH = font_width;
-        FONT_HEIGHT = font_height;
+        // Graphics mode draws the built-in font. The BIOS font stays in low
+        // RAM for the VGA text fallback, which cannot use a bitmap.
+        FONT_ADDR = crate::font::addr();
+        FONT_WIDTH = crate::font::WIDTH;
+        FONT_HEIGHT = crate::font::HEIGHT;
         BACK_ADDR = back_addr;
         BACK_SIZE = size as u32;
         RED_SHIFT = mask_shift(info.framebuffer_red_mask);
@@ -139,28 +128,6 @@ pub fn init(info: &BootInfo) -> bool {
         clear(0);
     }
     true
-}
-
-/// Check that the copied BIOS font looks like an 8x16 VGA font. A few firmware
-/// implementations return a stale or missing pointer from the INT 10h font
-/// call; in that case we keep the VGA text console instead of drawing garbage.
-fn font_is_sane(addr: u64, width: u32, height: u32) -> bool {
-    if addr == 0 || width == 0 || width > 8 || height < 8 || height > 32 {
-        return false;
-    }
-    let font = addr as *const u8;
-    // The space glyph must be blank and 'A' must contain ink.
-    for row in 0..height {
-        if unsafe { ptr::read_volatile(font.add(0x20 * height as usize + row as usize)) } != 0 {
-            return false;
-        }
-    }
-    let mut ink = 0u32;
-    for row in 0..height {
-        let bits = unsafe { ptr::read_volatile(font.add(0x41 * height as usize + row as usize)) };
-        ink += (bits & 0xFF).count_ones();
-    }
-    ink > 0
 }
 
 #[inline]

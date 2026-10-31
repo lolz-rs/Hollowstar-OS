@@ -70,6 +70,8 @@ static mut Y: i32 = 0;
 static mut DX: i32 = 0;
 static mut DY: i32 = 0;
 static mut WHEEL: i32 = 0;
+/// Wheel clicks not yet applied to the console scrollback.
+static mut WHEEL_PENDING: i32 = 0;
 static mut BUTTONS: u32 = 0;
 static mut PACKETS: u32 = 0;
 static mut OVERFLOW: bool = false;
@@ -242,6 +244,7 @@ pub fn init() {
         DX = 0;
         DY = 0;
         WHEEL = 0;
+        WHEEL_PENDING = 0;
         BUTTONS = 0;
         PACKETS = 0;
         OVERFLOW = false;
@@ -349,6 +352,7 @@ fn process_packet() {
         DY = dy;
         if wheel_delta != 0 {
             WHEEL = WHEEL.saturating_add(wheel_delta);
+            WHEEL_PENDING = WHEEL_PENDING.saturating_add(wheel_delta);
         }
         if overflow {
             OVERFLOW = true;
@@ -428,10 +432,36 @@ pub fn state() -> MouseState {
     state
 }
 
+/// Forget wheel clicks that happened while a command owned the screen.
+pub fn drop_pending_wheel() {
+    unsafe {
+        WHEEL_PENDING = 0;
+    }
+}
+
+fn take_pending_wheel() -> i32 {
+    unsafe {
+        let flags = crate::io::read_rflags();
+        crate::io::disable_interrupts();
+        let delta = WHEEL_PENDING;
+        WHEEL_PENDING = 0;
+        if (flags & 0x200) != 0 {
+            crate::io::enable_interrupts();
+        }
+        delta
+    }
+}
+
 /// Repaint the console when the cursor moved and no command owns the screen.
+/// Also apply the mouse wheel to the console scrollback.
 pub fn service() {
     if !available() || !crate::graphics::active() || crate::graphics::cmd_active() {
+        drop_pending_wheel();
         return;
+    }
+    let wheel = take_pending_wheel();
+    if wheel != 0 {
+        crate::console::scroll_by_wheel(wheel);
     }
     let dirty = unsafe { DIRTY };
     if dirty {

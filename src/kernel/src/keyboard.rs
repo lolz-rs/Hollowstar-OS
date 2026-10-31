@@ -147,6 +147,9 @@ fn handle_scancode(scancode: u8) {
             };
         }
 
+        if byte == 0x03 && crate::syscall::note_ctrl_c() {
+            return;
+        }
         if byte != 0 {
             push(byte);
         }
@@ -159,6 +162,9 @@ pub fn handle_serial_byte(byte: u8) {
         0x7F => 0x08,
         _ => byte,
     };
+    if byte == 0x03 && crate::syscall::note_ctrl_c() {
+        return;
+    }
     unsafe {
         push(byte);
     }
@@ -191,6 +197,9 @@ pub fn read_char() -> u8 {
                 unsafe { enable_interrupts() };
             }
             return byte;
+        }
+        if crate::syscall::cancel_requested() {
+            crate::syscall::abort_command();
         }
         idle += 1;
         if idle < 50_000 {

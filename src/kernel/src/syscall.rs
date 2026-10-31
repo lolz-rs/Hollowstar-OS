@@ -1,18 +1,102 @@
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use hollowstar_common::color;
 use hollowstar_common::*;
 
 use crate::{archive, audio, console, cpu, graphics, io, keyboard, memory, mouse, pit, shell};
 
 static COMMAND_EXIT_CODE: AtomicU64 = AtomicU64::new(0);
+/// Set when Ctrl+C should stop the running command.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+/// Set when it is safe to abandon the command immediately (not inside a syscall).
+static IMMEDIATE: AtomicBool = AtomicBool::new(false);
+static ABORTING: AtomicBool = AtomicBool::new(false);
+/// Non-zero while `int 0x80` is inside the kernel. Ctrl+C must not cut that short.
+static SYSCALL_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 extern "C" {
     fn command_abort() -> !;
+    static mut command_armed: u8;
+}
+
+fn armed() -> bool {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(command_armed)) != 0 }
+}
+
+fn disarm() {
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(command_armed), 0);
+    }
+}
+
+/// A running command pressed Ctrl+C. Returns true when the key should not be
+/// delivered as ordinary input.
+pub fn note_ctrl_c() -> bool {
+    if !armed() || ABORTING.load(Ordering::SeqCst) {
+        return false;
+    }
+    CANCEL.store(true, Ordering::SeqCst);
+    if SYSCALL_DEPTH.load(Ordering::SeqCst) == 0 {
+        IMMEDIATE.store(true, Ordering::SeqCst);
+    }
+    true
+}
+
+/// After the IRQ has sent EOI, abandon the command if it is not inside a syscall.
+pub fn take_immediate_abort() -> bool {
+    IMMEDIATE.swap(false, Ordering::SeqCst) && armed() && !ABORTING.load(Ordering::SeqCst)
+}
+
+pub fn enter_syscall() {
+    SYSCALL_DEPTH.fetch_add(1, Ordering::SeqCst);
+}
+
+pub fn leave_syscall() {
+    SYSCALL_DEPTH.fetch_sub(1, Ordering::SeqCst);
+}
+
+pub fn cancel_requested() -> bool {
+    CANCEL.load(Ordering::SeqCst) && armed() && !ABORTING.load(Ordering::SeqCst)
+}
+
+/// Stop the running command and return to the shell. Safe only when no syscall
+/// is half-finished, or when the caller is that syscall and has finished its work.
+pub fn abort_command() -> ! {
+    if ABORTING.swap(true, Ordering::SeqCst) {
+        loop {
+            unsafe {
+                io::hlt();
+            }
+        }
+    }
+    CANCEL.store(false, Ordering::SeqCst);
+    IMMEDIATE.store(false, Ordering::SeqCst);
+    SYSCALL_DEPTH.store(0, Ordering::SeqCst);
+    disarm();
+    COMMAND_EXIT_CODE.store(130, Ordering::Relaxed);
+    audio::off();
+    console::finish_command();
+    console::set_color(color::WHITE);
+    console::write_str("^C\n");
+    console::flush();
+    ABORTING.store(false, Ordering::SeqCst);
+    unsafe { command_abort() }
+}
+
+pub fn command_finished() {
+    CANCEL.store(false, Ordering::SeqCst);
+    IMMEDIATE.store(false, Ordering::SeqCst);
+    ABORTING.store(false, Ordering::SeqCst);
+    SYSCALL_DEPTH.store(0, Ordering::SeqCst);
+    disarm();
 }
 
 pub fn dispatch(num: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
-    match num {
+    if cancel_requested() {
+        abort_command();
+    }
+    let result = match num {
         SYS_WRITE => sys_write(a, b, c),
         SYS_READ_LINE => sys_read_line(a, b),
         SYS_EXIT => {
@@ -93,7 +177,11 @@ pub fn dispatch(num: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
             .unwrap_or(0) as u64,
         SYS_MOUSE_STATE => sys_mouse_state(a),
         _ => u64::MAX,
+    };
+    if cancel_requested() {
+        abort_command();
     }
+    result
 }
 
 fn sys_mouse_state(ptr: u64) -> u64 {

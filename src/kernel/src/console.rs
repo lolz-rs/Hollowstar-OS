@@ -17,11 +17,13 @@ const SHADOW_HEIGHT: usize = 25;
 /// writable, so keep the 80x25 text shadow in free low RAM instead. The VGA
 /// text fallback still uses 0xB8000 through vga.c.
 const SHADOW_ADDR: usize = 0x50000;
-/// Cell capacity for the largest mode we support (3840x2160 gives a 480x135
-/// grid). The live grid is clamped to this; 1080p uses 240x67.
-const MAX_COLS: usize = 512;
-const MAX_ROWS: usize = 256;
+/// Cell capacity. 1080p with the 14px font is 137x45.
+const MAX_COLS: usize = 256;
+const MAX_ROWS: usize = 128;
 const MAX_CELLS: usize = MAX_COLS * MAX_ROWS;
+/// Lines kept after they scroll off the top. Wheel-up shows them again.
+const SCROLL_LINES: usize = 128;
+const SCROLL_ADDR: usize = 0x0048_0000;
 
 /// Standard VGA 16-colour palette. Only used by the VGA text fallback and the
 /// 80x25 monitor dump, which are limited to 16 hardware colours. The graphics
@@ -72,6 +74,10 @@ static mut CELLS: *mut Cell = CELLS_ADDR as *mut Cell;
 static mut CURSOR_DRAWN: bool = false;
 static mut DRAWN_X: usize = 0;
 static mut DRAWN_Y: usize = 0;
+/// How many lines above the live screen the view is. 0 means the prompt.
+static mut VIEW: usize = 0;
+static mut SCROLL_COUNT: usize = 0;
+static mut SCROLL_HEAD: usize = 0;
 
 #[inline]
 unsafe fn cell_get(index: usize) -> Cell {
@@ -231,24 +237,22 @@ fn draw_cell_impl(x: usize, y: usize, cell: Cell, bg_prefilled: bool) {
         if cell.ch == b' ' || cell.ch == 0 {
             return;
         }
-        let glyph_cols = fw.min(8);
+        let glyph_stride = ((fw + 7) / 8) as usize;
         let font = info.font_addr as *const u8;
         if font.is_null() {
             return;
         }
-        let glyph = font.add(cell.ch as usize * fh as usize);
+        let glyph = font.add(cell.ch as usize * fh as usize * glyph_stride);
         let mut row = 0;
         while row < fh {
-            let bits = *glyph.add(row as usize);
-            if bits != 0 {
-                let dst = base.add((py + row) as usize * stride + px as usize);
-                let mut col = 0;
-                while col < glyph_cols {
-                    if (bits & (0x80 >> col)) != 0 {
-                        *dst.add(col as usize) = fg;
-                    }
-                    col += 1;
+            let dst = base.add((py + row) as usize * stride + px as usize);
+            let mut col = 0;
+            while col < fw {
+                let bits = *glyph.add(row as usize * glyph_stride + (col / 8) as usize);
+                if (bits & (0x80 >> (col % 8))) != 0 {
+                    *dst.add(col as usize) = fg;
                 }
+                col += 1;
             }
             row += 1;
         }
@@ -277,16 +281,25 @@ fn redraw_all() {
     }
 }
 
+/// A `|` in the gap on the right of the previous character. Glyphs leave a
+/// blank column on the left, so a 2px bar there reads as a text caret.
+fn draw_caret_bar(cell_x: usize, cell_y: usize) {
+    let fw = graphics::font_width().max(1);
+    let fh = graphics::font_height().max(1);
+    // One pixel on the right edge of the previous cell, so the bar does not
+    // cover the letter it is next to.
+    let px = (cell_x as u32 * fw).saturating_sub(1);
+    let py = cell_y as u32 * fh + 2;
+    let h = fh.saturating_sub(4).max(1);
+    graphics::fill_rect(px, py, 1, h, graphics::from_rgb(unsafe { COLOR }));
+}
+
 fn draw_cursor() {
     if !graphics_active() {
         return;
     }
     unsafe {
-        let fw = graphics::font_width().max(1);
-        let fh = graphics::font_height().max(1);
-        let px = CURSOR_X as u32 * fw;
-        let py = CURSOR_Y as u32 * fh + fh.saturating_sub(2);
-        graphics::fill_rect(px, py, fw, 2, graphics::from_rgb(COLOR));
+        draw_caret_bar(CURSOR_X, CURSOR_Y);
         CURSOR_DRAWN = true;
         DRAWN_X = CURSOR_X;
         DRAWN_Y = CURSOR_Y;
@@ -313,8 +326,136 @@ fn put_cell(x: usize, y: usize, ch: u8) {
     shadow_put(x, y, cell);
 }
 
+fn scroll_line(slot: usize) -> *mut Cell {
+    unsafe { (SCROLL_ADDR as *mut Cell).add(slot * MAX_COLS) }
+}
+
+fn scroll_slot(oldest_index: usize) -> usize {
+    unsafe {
+        let start = if SCROLL_COUNT == SCROLL_LINES {
+            SCROLL_HEAD
+        } else {
+            0
+        };
+        (start + oldest_index) % SCROLL_LINES
+    }
+}
+
+fn push_scroll_line() {
+    unsafe {
+        let dst = scroll_line(SCROLL_HEAD);
+        let blank = blank_cell();
+        let mut x = 0;
+        while x < MAX_COLS {
+            let cell = if x < COLS { cell_get(x) } else { blank };
+            *dst.add(x) = cell;
+            x += 1;
+        }
+        SCROLL_HEAD = (SCROLL_HEAD + 1) % SCROLL_LINES;
+        if SCROLL_COUNT < SCROLL_LINES {
+            SCROLL_COUNT += 1;
+        }
+    }
+}
+
+fn viewed_cell(x: usize, screen_y: usize) -> Cell {
+    unsafe {
+        let index = SCROLL_COUNT - VIEW + screen_y;
+        if index < SCROLL_COUNT {
+            *scroll_line(scroll_slot(index)).add(x)
+        } else {
+            let live = index - SCROLL_COUNT;
+            if live < ROWS && x < COLS {
+                cell_get(live * MAX_COLS + x)
+            } else {
+                blank_cell()
+            }
+        }
+    }
+}
+
+/// Paint the screen for the current scroll position. `VIEW == 0` is the live
+/// prompt; a larger value shows lines that have already scrolled off.
+fn paint_view() {
+    if !graphics_active() {
+        return;
+    }
+    graphics::clear(0);
+    unsafe {
+        let mut y = 0;
+        while y < ROWS {
+            let mut x = 0;
+            while x < COLS {
+                draw_cell_impl(x, y, viewed_cell(x, y), true);
+                x += 1;
+            }
+            y += 1;
+        }
+        CURSOR_DRAWN = false;
+        let screen_y = CURSOR_Y + VIEW;
+        if screen_y < ROWS {
+            draw_caret_bar(CURSOR_X, screen_y);
+            CURSOR_DRAWN = VIEW == 0;
+            DRAWN_X = CURSOR_X;
+            DRAWN_Y = CURSOR_Y;
+        }
+    }
+}
+
+fn ensure_live_view() {
+    unsafe {
+        if VIEW != 0 {
+            VIEW = 0;
+            paint_view();
+        }
+    }
+}
+
+/// Mouse wheel. Scrolling up moves into older lines.
+pub fn scroll_by_wheel(delta: i32) {
+    if !graphics_active() || graphics::cmd_active() || delta == 0 {
+        return;
+    }
+    unsafe {
+        let max = SCROLL_COUNT as i32;
+        // The wheel delta comes in backwards relative to the console: negate
+        // it so wheel-up shows older lines and wheel-down returns to the prompt.
+        let next = (VIEW as i32 - delta.saturating_mul(3)).clamp(0, max) as usize;
+        if next == VIEW {
+            return;
+        }
+        VIEW = next;
+    }
+    paint_view();
+    graphics::present_dirty();
+}
+
+pub fn columns() -> usize {
+    unsafe { COLS }
+}
+
+pub fn rows() -> usize {
+    unsafe { ROWS }
+}
+
+pub fn cursor_pos() -> (usize, usize) {
+    unsafe { (CURSOR_X, CURSOR_Y) }
+}
+
+/// Move the text caret. The next `flush` draws the bar there.
+pub fn set_cursor(x: usize, y: usize) {
+    unsafe {
+        if COLS == 0 || ROWS == 0 {
+            return;
+        }
+        CURSOR_X = x.min(COLS - 1);
+        CURSOR_Y = y.min(ROWS - 1);
+    }
+}
+
 fn scroll() {
     unsafe {
+        push_scroll_line();
         let mut y = 1;
         while y < ROWS {
             let mut x = 0;
@@ -348,6 +489,7 @@ fn newline() {
 }
 
 fn write_graphics(byte: u8) {
+    ensure_live_view();
     unsafe {
         match byte {
             b'\n' => newline(),
@@ -427,6 +569,9 @@ pub fn set_present_ready(ready: bool) {
 }
 
 pub fn clear() {
+    unsafe {
+        VIEW = 0;
+    }
     if graphics_active() {
         clear_cells();
         shadow_clear();
@@ -504,8 +649,22 @@ pub fn flush() {
     if !(unsafe { PRESENT_READY }) {
         return;
     }
+    if unsafe { VIEW } != 0 {
+        paint_view();
+        graphics::present_dirty();
+        return;
+    }
     unsafe {
         if CURSOR_DRAWN {
+            // The bar sits on the right edge of the previous cell. Repaint both
+            // or a ghost caret is left behind, especially when moving right.
+            if DRAWN_X > 0 {
+                draw_cell(
+                    DRAWN_X - 1,
+                    DRAWN_Y,
+                    cell_get(DRAWN_Y * MAX_COLS + DRAWN_X - 1),
+                );
+            }
             draw_cell(DRAWN_X, DRAWN_Y, cell_get(DRAWN_Y * MAX_COLS + DRAWN_X));
         }
     }
@@ -517,6 +676,10 @@ pub fn enter_graphics_command() -> bool {
     if !graphics_active() {
         return false;
     }
+    unsafe {
+        VIEW = 0;
+    }
+    crate::mouse::drop_pending_wheel();
     graphics::enter()
 }
 

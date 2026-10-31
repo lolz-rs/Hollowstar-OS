@@ -6,6 +6,7 @@ mod audio;
 mod console;
 mod cpu;
 mod elf;
+mod font;
 mod gdt;
 mod graphics;
 mod idt;

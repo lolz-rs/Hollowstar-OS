@@ -81,7 +81,7 @@ def main():
     failures = []
 
     ok, missing, text = run(16, ["gfxinfo", "gfxdemo 1"],
-                            ["1920x1080x32", "8100 KiB", "240x67",
+                            ["1920x1080x32", "8100 KiB", "137x45",
                              "double buffered", "frames", "fps"])
     if not ok:
         failures.append("vgamem_mb=16 did not reach the prompt")
@@ -98,7 +98,7 @@ def main():
         print(f"1080p gfxdemo: {match.group(2)} fps")
 
     ok, missing, text = run(4, ["gfxinfo"],
-                            ["1280x720x32", "160x45", "double buffered"])
+                            ["1280x720x32", "91x30", "double buffered"])
     if not ok:
         failures.append("vgamem_mb=4 did not reach the prompt")
     if missing:
@@ -107,7 +107,7 @@ def main():
         print("1280x720 fallback: ok")
 
     ok, missing, text = run(2, ["gfxinfo"],
-                            ["800x600x32", "100x37", "double buffered"])
+                            ["800x600x32", "57x25", "double buffered"])
     if not ok:
         failures.append("vgamem_mb=2 did not reach the prompt")
     if missing:

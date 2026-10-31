@@ -26,11 +26,12 @@ fn args_ptr() -> *mut u8 {
     addr_of_mut!(ARGS) as *mut u8
 }
 
+const PROMPT: &str = "Hollowstar> ";
+
 fn print_prompt() {
     console::set_color(color::CYAN);
-    console::write_str("Hollowstar> ");
+    console::write_str(PROMPT);
     console::set_color(color::WHITE);
-    console::flush();
 }
 
 fn add_history(buffer: *const u8, len: usize) {
@@ -80,102 +81,309 @@ fn history_copy(index: usize, dest: *mut u8) -> usize {
     }
 }
 
-fn redraw(prompt: bool, old_len: usize, new_len: usize, buffer: *const u8) {
+fn caret_cell(start_x: usize, start_y: usize, caret: usize) -> (usize, usize) {
+    let cols = console::columns().max(1);
+    let rows = console::rows().max(1);
+    let mut x = start_x;
+    let mut y = start_y;
+    let mut left = caret;
+    while left > 0 {
+        x += 1;
+        if x >= cols {
+            x = 0;
+            y = y.saturating_add(1);
+        }
+        left -= 1;
+    }
+    if y >= rows {
+        y = rows - 1;
+    }
+    (x, y)
+}
+
+/// Reprint the input and park the `|` caret to the right of the selected
+/// character. `caret == 0` puts the bar at the start of the line.
+fn show_input(
+    line_row: usize,
+    prompt: bool,
+    buffer: *const u8,
+    len: usize,
+    caret: usize,
+    clear_to: usize,
+) -> (usize, usize) {
+    // `\r` keeps a serial terminal on the same line. The graphics cursor is
+    // then parked at the start of the prompt row, even if the bar had wrapped.
     console::write_byte(b'\r');
+    console::set_cursor(0, line_row);
     if prompt {
         print_prompt();
     }
-    for i in 0..new_len {
+    let (sx, sy) = console::cursor_pos();
+    for i in 0..len {
         console::write_byte(unsafe { *buffer.add(i) });
     }
-    if old_len > new_len {
-        for _ in 0..(old_len - new_len) {
+    if clear_to > len {
+        for _ in 0..(clear_to - len) {
             console::write_byte(b' ');
         }
-        for _ in 0..(old_len - new_len) {
-            console::write_byte(0x08);
-        }
     }
+    let (cx, cy) = caret_cell(sx, sy, caret);
+    console::set_cursor(cx, cy);
+    console::flush();
+    (sx, sy)
+}
+
+const ALIASES: [&[u8]; 4] = [b"exit", b"fastfetch", b"neofetch", b"shutdown"];
+
+fn name_count() -> usize {
+    archive::count() + ALIASES.len()
+}
+
+fn name_at(index: usize) -> &'static [u8] {
+    let commands = archive::count();
+    if index < commands {
+        archive::name_bytes(archive::entry(index).unwrap())
+    } else {
+        ALIASES[index - commands]
+    }
+}
+
+/// Complete the command being typed. Returns the new length and whether the
+/// matches were printed (so the prompt has to be drawn again).
+fn complete(buffer: *mut u8, len: usize) -> (usize, bool) {
+    let line = unsafe { core::slice::from_raw_parts(buffer, len) };
+    if line.iter().any(|&b| b == b' ' || b == b'\t') {
+        return (len, false);
+    }
+
+    let mut matches = [0usize; 32];
+    let mut nmatch = 0usize;
+    let mut i = 0usize;
+    while i < name_count() {
+        let name = name_at(i);
+        if name.starts_with(line) && nmatch < matches.len() {
+            matches[nmatch] = i;
+            nmatch += 1;
+        }
+        i += 1;
+    }
+    if nmatch == 0 {
+        return (len, false);
+    }
+    let mut a = 0usize;
+    while a < nmatch {
+        let mut b = a + 1;
+        while b < nmatch {
+            if name_at(matches[b]) < name_at(matches[a]) {
+                matches.swap(a, b);
+            }
+            b += 1;
+        }
+        a += 1;
+    }
+    if nmatch == 1 {
+        let name = name_at(matches[0]);
+        let mut new_len = name.len().min(LINE_MAX - 2);
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), buffer, new_len);
+            if new_len + 1 < LINE_MAX {
+                *buffer.add(new_len) = b' ';
+                new_len += 1;
+            }
+        }
+        return (new_len, false);
+    }
+
+    let first = name_at(matches[0]);
+    let mut common = line.len();
+    while common < first.len() {
+        let byte = first[common];
+        let mut ok = true;
+        let mut k = 1usize;
+        while k < nmatch {
+            let name = name_at(matches[k]);
+            if common >= name.len() || name[common] != byte {
+                ok = false;
+                break;
+            }
+            k += 1;
+        }
+        if !ok {
+            break;
+        }
+        common += 1;
+    }
+    if common > line.len() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(first.as_ptr(), buffer, common);
+        }
+        return (common, false);
+    }
+
+    console::write_byte(b'\n');
+    let width = console::columns().max(16);
+    let mut col = 0usize;
+    let mut k = 0usize;
+    while k < nmatch {
+        let name = name_at(matches[k]);
+        if col > 0 && col + name.len() + 2 > width {
+            console::write_byte(b'\n');
+            col = 0;
+        } else if col > 0 {
+            console::write_str("  ");
+            col += 2;
+        }
+        console::write_bytes(name);
+        col += name.len();
+        k += 1;
+    }
+    console::write_byte(b'\n');
+    (len, true)
 }
 
 pub fn read_line(prompt: bool) -> usize {
     let buffer = line_ptr();
     let mut len = 0usize;
+    let mut caret = 0usize;
+    let mut shown = 0usize;
     let mut hist_pos = unsafe { *addr_of_mut!(HISTORY_COUNT) };
+    let mut line_row = console::cursor_pos().1;
 
     if prompt {
         print_prompt();
     }
+    let (mut start_x, mut start_y) = console::cursor_pos();
+    console::flush();
 
     loop {
         let byte = keyboard::read_char();
         match byte {
             b'\n' | b'\r' => {
+                let (end_x, end_y) = caret_cell(start_x, start_y, len);
+                console::set_cursor(end_x, end_y);
                 console::write_byte(b'\n');
                 console::flush();
                 add_history(buffer, len);
                 return len;
             }
             b'\x08' | 0x7F => {
-                if len > 0 {
+                if caret > 0 {
+                    let mut i = caret - 1;
+                    while i + 1 < len {
+                        unsafe {
+                            *buffer.add(i) = *buffer.add(i + 1);
+                        }
+                        i += 1;
+                    }
                     len -= 1;
-                    console::write_byte(0x08);
-                    console::flush();
+                    caret -= 1;
+                    let start = show_input(line_row, prompt, buffer, len, caret, shown);
+                    start_x = start.0;
+                    start_y = start.1;
+                    shown = len;
                 }
             }
             b'\x03' => {
+                let (end_x, end_y) = caret_cell(start_x, start_y, len);
+                console::set_cursor(end_x, end_y);
                 console::write_str("^C\n");
                 console::flush();
                 return 0;
             }
             b'\x0C' => {
                 console::clear();
-                if prompt {
-                    print_prompt();
-                }
-                for i in 0..len {
-                    console::write_byte(unsafe { *buffer.add(i) });
-                }
-                console::flush();
+                line_row = 0;
+                let start = show_input(line_row, prompt, buffer, len, caret, 0);
+                start_x = start.0;
+                start_y = start.1;
+                shown = len;
             }
             b'\x15' => {
-                while len > 0 {
-                    len -= 1;
-                    console::write_byte(0x08);
+                len = 0;
+                caret = 0;
+                let start = show_input(line_row, prompt, buffer, len, caret, shown);
+                start_x = start.0;
+                start_y = start.1;
+                shown = 0;
+            }
+            b'\t' => {
+                let old_len = len;
+                let (end_x, end_y) = caret_cell(start_x, start_y, len);
+                console::set_cursor(end_x, end_y);
+                let (new_len, listed) = complete(buffer, len);
+                len = new_len;
+                caret = len;
+                if listed {
+                    line_row = console::cursor_pos().1;
                 }
-                console::flush();
+                let start = show_input(line_row, prompt, buffer, len, caret, if listed { 0 } else { shown.max(old_len) });
+                start_x = start.0;
+                start_y = start.1;
+                shown = len;
             }
             0x80 => {
                 if hist_pos > 0 {
                     hist_pos -= 1;
-                    let old_len = len;
+                    let old_len = len.max(shown);
                     len = history_copy(hist_pos, buffer);
-                    redraw(prompt, old_len, len, buffer);
-                    console::flush();
+                    caret = len;
+                    let start = show_input(line_row, prompt, buffer, len, caret, old_len);
+                    start_x = start.0;
+                    start_y = start.1;
+                    shown = len;
                 }
             }
             0x81 => {
                 if hist_pos < unsafe { *addr_of_mut!(HISTORY_COUNT) } {
                     hist_pos += 1;
-                    let old_len = len;
+                    let old_len = len.max(shown);
                     if hist_pos == unsafe { *addr_of_mut!(HISTORY_COUNT) } {
                         len = 0;
                     } else {
                         len = history_copy(hist_pos, buffer);
                     }
-                    redraw(prompt, old_len, len, buffer);
+                    caret = len;
+                    let start = show_input(line_row, prompt, buffer, len, caret, old_len);
+                    start_x = start.0;
+                    start_y = start.1;
+                    shown = len;
+                }
+            }
+            0x82 => {
+                if caret > 0 {
+                    caret -= 1;
+                    let (cx, cy) = caret_cell(start_x, start_y, caret);
+                    console::set_cursor(cx, cy);
                     console::flush();
                 }
             }
-            0x82 | 0x83 | 0x84 | 0x85 => {}
+            0x83 => {
+                if caret < len {
+                    caret += 1;
+                    let (cx, cy) = caret_cell(start_x, start_y, caret);
+                    console::set_cursor(cx, cy);
+                    console::flush();
+                }
+            }
+            0x84 | 0x85 => {}
             0x20..=0x7E => {
                 if len + 1 < LINE_MAX {
+                    let mut i = len;
+                    while i > caret {
+                        unsafe {
+                            *buffer.add(i) = *buffer.add(i - 1);
+                        }
+                        i -= 1;
+                    }
                     unsafe {
-                        *buffer.add(len) = byte;
+                        *buffer.add(caret) = byte;
                     }
                     len += 1;
-                    console::write_byte(byte);
-                    console::flush();
+                    caret += 1;
+                    let start = show_input(line_row, prompt, buffer, len, caret, shown);
+                    start_x = start.0;
+                    start_y = start.1;
+                    shown = len;
                 }
             }
             _ => {}
@@ -294,6 +502,7 @@ fn execute(line: &[u8]) {
             COMMAND_STACK_TOP,
         );
     }
+    syscall::command_finished();
     console::finish_command();
     console::flush();
 }

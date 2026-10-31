@@ -27,6 +27,9 @@ pub fn uptime_ms() -> u64 {
 pub fn sleep_ms(ms: u64) {
     let target = uptime_ms().saturating_add(ms);
     while uptime_ms() < target {
+        if crate::syscall::cancel_requested() {
+            crate::syscall::abort_command();
+        }
         unsafe {
             crate::io::wait_for_interrupt();
         }
